@@ -7,29 +7,41 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from telethon import TelegramClient
-from telethon.errors import SessionPasswordNeededError
 
-# Получаем токен из переменной окружения
+# ---------- Чтение переменных окружения ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_ID = int(os.getenv("TELEGRAM_API_ID"))  # ID вашего аккаунта Telegram
-API_HASH = os.getenv("TELEGRAM_API_HASH")  # Hash вашего аккаунта Telegram
+TELEGRAM_API_ID_STR = os.getenv("TELEGRAM_API_ID")
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 
-if not BOT_TOKEN or not API_ID or not API_HASH:
-    raise ValueError("Не указаны TELEGRAM_API_ID, TELEGRAM_API_HASH или BOT_TOKEN!")
+# Проверяем, что все необходимые переменные заданы
+if not BOT_TOKEN:
+    raise ValueError("❌ Переменная окружения BOT_TOKEN не установлена!")
+if not TELEGRAM_API_ID_STR:
+    raise ValueError("❌ Переменная окружения TELEGRAM_API_ID не установлена!")
+if not TELEGRAM_API_HASH:
+    raise ValueError("❌ Переменная окружения TELEGRAM_API_HASH не установлена!")
 
+# Преобразуем API_ID в число (после проверки, что строка не пуста)
+try:
+    API_ID = int(TELEGRAM_API_ID_STR)
+except ValueError:
+    raise ValueError("❌ TELEGRAM_API_ID должно быть числом!")
+
+# ---------- Инициализация бота ----------
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Список популярных каналов с прокси
+# ---------- Настройки ----------
+# Каналы, из которых будем парсить прокси (измените на реальные)
 PROXY_CHANNELS = [
-    "socks5_proxies",  # Пример имени канала
+    "socks5_proxies",  # пример, замените на существующие каналы
     "free_proxy_list",
 ]
 
 # Регулярное выражение для поиска IP:PORT
 IP_PORT_REGEX = r"\b(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}\b"
 
-# Клавиатура с кнопками
+# ---------- Клавиатуры ----------
 def get_main_menu_keyboard():
     keyboard = [
         [types.InlineKeyboardButton(text="🔍 Найти прокси", callback_data="find_proxy")],
@@ -37,25 +49,33 @@ def get_main_menu_keyboard():
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
+# ---------- Получение прокси из Telegram-каналов ----------
 async def fetch_proxies_from_telegram():
+    """Парсит прокси из сообщений указанных каналов за последние 24 часа."""
     all_proxies = []
-    async with TelegramClient("session_name", API_ID, API_HASH) as client:
+    async with TelegramClient("session_name", API_ID, TELEGRAM_API_HASH) as client:
         for channel in PROXY_CHANNELS:
             try:
-                # Получаем последние 100 сообщений из канала
                 messages = await client.get_messages(channel, limit=100)
                 for message in messages:
-                    if message.date > datetime.now() - timedelta(days=1):  # Только за последние 24 часа
-                        if message.text:  # Проверка, что сообщение содержит текст
+                    # Фильтруем только сообщения за последние сутки
+                    if message.date and message.date > datetime.now() - timedelta(days=1):
+                        if message.text:  # проверяем наличие текста
                             matches = re.findall(IP_PORT_REGEX, message.text)
                             for match in matches:
                                 ip, port = match.split(":")
-                                all_proxies.append({"ip": ip, "port": int(port), "date": message.date})
+                                all_proxies.append({
+                                    "ip": ip,
+                                    "port": int(port),
+                                    "date": message.date
+                                })
             except Exception as e:
-                print(f"Ошибка при получении сообщений из канала {channel}: {e}")
+                print(f"⚠️ Ошибка при получении сообщений из канала {channel}: {e}")
     return all_proxies
 
+# ---------- Проверка работоспособности прокси ----------
 async def check_proxy(proxy_ip, proxy_port):
+    """Проверяет прокси через httpbin.org (работает только для HTTP/HTTPS)."""
     start_time = time.time()
     try:
         connector = aiohttp.TCPConnector(limit=1)
@@ -74,6 +94,7 @@ async def check_proxy(proxy_ip, proxy_port):
         pass
     return False, 0, False
 
+# ---------- Обработчики команд и callback-запросов ----------
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     welcome_text = (
@@ -86,7 +107,6 @@ async def cmd_start(message: types.Message):
 @dp.callback_query(lambda c: c.data == "find_proxy")
 async def process_find_proxy(callback_query: types.CallbackQuery):
     await callback_query.message.answer("🔍 Поиск прокси в Telegram...")
-    
     proxies = await fetch_proxies_from_telegram()
     working_proxies = []
 
