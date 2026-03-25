@@ -21,5 +21,4 @@ jobs:
           TELEGRAM_SESSION_B64: ${{ secrets.TELEGRAM_SESSION_B64 }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           AI_SYSTEM_PROMPT: ${{ secrets.AI_SYSTEM_PROMPT }}
-          AI_RESPONSE_DELAY: ${{ secrets.AI_RESPONSE_DELAY }}
         run: python main.py
