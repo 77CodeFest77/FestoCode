@@ -1,7 +1,8 @@
 """
-Telegram бот для поиска:
-- рабочих SOCKS5/HTTP прокси
-- VPN ботов с пробным периодом (автоматическая проверка)
+Telegram бот:
+- поиск SOCKS5 прокси
+- поиск VPN ботов с проверкой пробного периода
+- получение информации о пользователе по username
 """
 
 import asyncio
@@ -19,6 +20,8 @@ from aiohttp_socks import SocksConnector
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from dotenv import load_dotenv
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
@@ -40,7 +43,7 @@ MAX_PROXIES_TO_CHECK = int(os.getenv("MAX_PROXIES_TO_CHECK", "20"))
 CONCURRENT_CHECKS = int(os.getenv("CONCURRENT_CHECKS", "5"))
 PROXY_CHECK_TIMEOUT = int(os.getenv("PROXY_CHECK_TIMEOUT", "10"))
 PROXY_CHECK_URL = os.getenv("PROXY_CHECK_URL", "http://httpbin.org/ip")
-MAX_VPN_BOTS_TO_CHECK = int(os.getenv("MAX_VPN_BOTS_TO_CHECK", "10"))  # ограничиваем количество ботов для проверки
+MAX_VPN_BOTS_TO_CHECK = int(os.getenv("MAX_VPN_BOTS_TO_CHECK", "10"))
 
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN не задан!")
@@ -52,6 +55,10 @@ if USE_TELEGRAM_SOURCES:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
+# ---------- FSM состояния ----------
+class UserInfoState(StatesGroup):
+    waiting_for_username = State()
+
 # ---------- Конфигурация ----------
 WEB_PROXY_SOURCES = [
     {"url": "https://www.proxy-list.download/api/v1/get?type=socks5", "parser": "line_ip_port"},
@@ -60,13 +67,12 @@ WEB_PROXY_SOURCES = [
 ]
 
 TELEGRAM_PROXY_CHANNELS = [
-    "socks5_proxies",          # замените на реальные каналы с прокси
+    "socks5_proxies",          # замените на реальные
     "free_proxy_list",
 ]
 
-# ЗДЕСЬ УКАЖИТЕ РЕАЛЬНЫЕ КАНАЛЫ, ГДЕ ПУБЛИКУЮТ VPN-БОТОВ
 VPN_BOT_CHANNELS = [
-    "vpn_bot_list",            # пример, замените на существующие
+    "vpn_bot_list",            # замените на реальные
     "free_vpn_bots",
 ]
 
@@ -100,7 +106,7 @@ async def get_telegram_client() -> TelegramClient:
     await client.disconnect()
     sys.exit(0)
 
-# ---------- Парсинг веб-источников (прокси) ----------
+# ---------- Парсинг прокси ----------
 async def parse_web_source(session: aiohttp.ClientSession, source: Dict) -> List[Dict]:
     proxies = []
     try:
@@ -134,7 +140,6 @@ async def fetch_proxies_from_web() -> List[Dict]:
             unique[key] = p
     return list(unique.values())
 
-# ---------- Парсинг прокси из Telegram ----------
 async def fetch_proxies_from_telegram() -> List[Dict]:
     client = await get_telegram_client()
     async with client:
@@ -159,9 +164,8 @@ async def fetch_proxies_from_telegram() -> List[Dict]:
                 logger.error(f"Ошибка получения из {channel}: {e}")
         return all_proxies
 
-# ---------- Парсинг VPN ботов из Telegram ----------
+# ---------- Поиск VPN ботов ----------
 async def fetch_vpn_bots_from_telegram() -> List[Dict]:
-    """Ищет в каналах сообщения с ключевыми словами и извлекает ссылки на ботов."""
     client = await get_telegram_client()
     async with client:
         bots = []
@@ -174,7 +178,6 @@ async def fetch_vpn_bots_from_telegram() -> List[Dict]:
                     if msg.text and VPN_KEYWORDS.search(msg.text):
                         links = BOT_LINK_REGEX.findall(msg.text)
                         for link in links:
-                            # Приводим ссылку к формату @username
                             if link.startswith("https://t.me/"):
                                 username = link.split("/")[-1]
                                 link = f"@{username}"
@@ -186,7 +189,6 @@ async def fetch_vpn_bots_from_telegram() -> List[Dict]:
                             })
             except Exception as e:
                 logger.error(f"Ошибка получения из {channel}: {e}")
-        # Убираем дубликаты
         unique = {}
         for b in bots:
             key = b["link"]
@@ -194,19 +196,13 @@ async def fetch_vpn_bots_from_telegram() -> List[Dict]:
                 unique[key] = b
         return list(unique.values())
 
-# ---------- Проверка одного VPN бота (отправка /start) ----------
 async def check_one_vpn_bot(bot_link: str, client: TelegramClient) -> Tuple[str, str, bool]:
-    """
-    Отправляет /start указанному боту и возвращает (username, текст_ответа, has_trial).
-    """
     try:
         entity = await client.get_entity(bot_link)
-        # Отправляем /start в диалоге с ботом
         async with client.conversation(entity, timeout=30) as conv:
             await conv.send_message('/start')
             response = await conv.get_response()
             response_text = response.text if response.text else "(нет текста)"
-            # Проверяем наличие ключевых слов в ответе
             has_trial = bool(VPN_KEYWORDS.search(response_text))
             return bot_link, response_text, has_trial
     except FloodWaitError as e:
@@ -218,10 +214,6 @@ async def check_one_vpn_bot(bot_link: str, client: TelegramClient) -> Tuple[str,
         return bot_link, f"Ошибка: {e}", False
 
 async def check_vpn_bots(bots: List[Dict], progress_callback=None) -> List[Dict]:
-    """
-    Проверяет список ботов, отправляя /start каждому.
-    Возвращает список результатов с полями: link, response, has_trial.
-    """
     client = await get_telegram_client()
     async with client:
         results = []
@@ -237,7 +229,6 @@ async def check_vpn_bots(bots: List[Dict], progress_callback=None) -> List[Dict]
             })
             if progress_callback:
                 await progress_callback(i+1, len(bots[:MAX_VPN_BOTS_TO_CHECK]))
-            # Небольшая задержка между запросами, чтобы не нагружать сервер
             await asyncio.sleep(1)
         return results
 
@@ -255,8 +246,8 @@ async def check_proxy_socks5(proxy_ip: str, proxy_port: int) -> Tuple[bool, floa
                     origin_ip = data.get("origin", "")
                     is_anonymous = origin_ip != proxy_ip
                     return True, elapsed, is_anonymous
-    except Exception as e:
-        logger.debug(f"Proxy {proxy_ip}:{proxy_port} failed: {e}")
+    except Exception:
+        pass
     return False, 0, False
 
 async def check_proxies_batch(proxies: List[Dict], progress_callback=None) -> List[Dict]:
@@ -292,7 +283,8 @@ async def check_proxies_batch(proxies: List[Dict], progress_callback=None) -> Li
 def get_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔍 Найти прокси", callback_data="find_proxy")],
-        [InlineKeyboardButton(text="🤖 Найти VPN ботов (с проверкой)", callback_data="find_vpn")],
+        [InlineKeyboardButton(text="🤖 Найти VPN ботов", callback_data="find_vpn")],
+        [InlineKeyboardButton(text="👤 Инфо о пользователе", callback_data="user_info")],
         [InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")]
     ])
 
@@ -302,7 +294,8 @@ async def cmd_start(message: types.Message):
     await message.answer(
         "👋 Привет! Я могу:\n"
         "• Найти рабочие SOCKS5 прокси\n"
-        "• Найти VPN ботов в Telegram и автоматически проверить наличие пробного периода\n\n"
+        "• Найти VPN ботов в Telegram и проверить пробный период\n"
+        "• Показать информацию о пользователе по username\n\n"
         "Выбери действие:",
         reply_markup=get_main_keyboard()
     )
@@ -319,6 +312,12 @@ async def callback_find_vpn(callback: types.CallbackQuery):
     status_msg = await callback.message.answer("🔍 Поиск VPN ботов в Telegram...")
     asyncio.create_task(search_and_send_vpn(callback.from_user.id, status_msg.chat.id, status_msg.message_id))
 
+@dp.callback_query(lambda c: c.data == "user_info")
+async def callback_user_info(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await callback.message.answer("Введите username пользователя (с @ или без):")
+    await state.set_state(UserInfoState.waiting_for_username)
+
 @dp.callback_query(lambda c: c.data == "about")
 async def callback_about(callback: types.CallbackQuery):
     await callback.answer()
@@ -328,7 +327,11 @@ async def callback_about(callback: types.CallbackQuery):
         "Проверяются SOCKS5 прокси на скорость и анонимность.\n\n"
         "**VPN боты:** собираются из Telegram-каналов, затем каждому отправляется `/start`.\n"
         "Если в ответе есть ключевые слова (пробный, бесплатный, trial и т.п.), бот отмечается как имеющий пробный период.\n\n"
-        "⚠️ *Внимание:* автоматическая проверка ботов может занимать время и подвержена ограничениям Telegram.\n\n"
+        "**Информация о пользователе:** по username получает публичные данные: ID, имя, био, статус и т.д.\n\n"
+        "⚠️ *Примечания:*\n"
+        "- Номер телефона виден только если пользователь в ваших контактах.\n"
+        "- Онлайн-статус доступен только для контактов.\n"
+        "- Нельзя узнать список групп, в которых состоит пользователь.\n\n"
         "⚙️ Настройки:\n"
         f"• Максимум прокси для проверки: {MAX_PROXIES_TO_CHECK}\n"
         f"• Максимум VPN ботов для проверки: {MAX_VPN_BOTS_TO_CHECK}\n"
@@ -338,7 +341,7 @@ async def callback_about(callback: types.CallbackQuery):
         parse_mode="Markdown"
     )
 
-# ---------- Поиск прокси ----------
+# ---------- Поиск прокси (фоновая задача) ----------
 async def update_progress(chat_id: int, msg_id: int, current: int, total: int):
     text = f"🔍 Проверено {current} из {total} прокси..."
     await bot.edit_message_text(text=text, chat_id=chat_id, message_id=msg_id)
@@ -438,7 +441,6 @@ async def search_and_send_vpn(user_id: int, chat_id: int, status_msg_id: int):
             )
             return
 
-        # Собираем ссылки из каналов
         bots = await fetch_vpn_bots_from_telegram()
         if not bots:
             await bot.edit_message_text(
@@ -448,7 +450,6 @@ async def search_and_send_vpn(user_id: int, chat_id: int, status_msg_id: int):
             )
             return
 
-        # Ограничиваем количество для проверки
         bots_to_check = bots[:MAX_VPN_BOTS_TO_CHECK]
         await bot.edit_message_text(
             text=f"📦 Найдено {len(bots)} ботов, проверяю {len(bots_to_check)}...",
@@ -456,20 +457,17 @@ async def search_and_send_vpn(user_id: int, chat_id: int, status_msg_id: int):
             message_id=status_msg_id
         )
 
-        # Проверяем каждого бота (отправляем /start)
         results = await check_vpn_bots(
             bots_to_check,
             progress_callback=lambda cur, total: update_vpn_progress(chat_id, status_msg_id, cur, total)
         )
 
-        # Формируем ответ
         if results:
             response = "🤖 **Результаты проверки VPN ботов:**\n\n"
             for r in results:
                 emoji = "✅" if r["has_trial"] else "❌"
                 response += f"{emoji} {r['link']}\n"
                 if r["has_trial"]:
-                    # Показываем фрагмент ответа
                     short_response = r["response"][:100].replace("\n", " ")
                     response += f"   📝 *Ответ:* {short_response}...\n"
                 response += f"   📡 *Источник:* {r['source']}\n\n"
@@ -493,6 +491,93 @@ async def search_and_send_vpn(user_id: int, chat_id: int, status_msg_id: int):
             message_id=status_msg_id
         )
 
+# ---------- Обработчик ввода username для информации о пользователе ----------
+@dp.message(UserInfoState.waiting_for_username)
+async def process_username(message: types.Message, state: FSMContext):
+    username = message.text.strip().lstrip('@')
+    if not username:
+        await message.answer("❌ Вы не ввели username.")
+        await state.clear()
+        return
+
+    status_msg = await message.answer(f"🔍 Ищу пользователя @{username}...")
+
+    try:
+        client = await get_telegram_client()
+        async with client:
+            user = await client.get_entity(username)
+    except ValueError:
+        await status_msg.edit_text(f"❌ Пользователь @{username} не найден.")
+        await state.clear()
+        return
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Ошибка: {e}")
+        await state.clear()
+        return
+
+    # Формируем ответ
+    info = f"👤 **Информация о пользователе @{user.username}**\n\n"
+    info += f"🆔 ID: `{user.id}`\n"
+    info += f"📛 Имя: {user.first_name or '—'}\n"
+    if user.last_name:
+        info += f"📛 Фамилия: {user.last_name}\n"
+    if user.bio:
+        info += f"📝 О себе: {user.bio}\n"
+    info += f"🤖 Бот: {'Да' if user.bot else 'Нет'}\n"
+    if hasattr(user, 'phone') and user.phone:
+        info += f"📞 Телефон: `{user.phone}`\n"
+    if user.photo:
+        # Получаем ссылку на фото (только если есть)
+        info += f"🖼️ Фото: есть (не показывается в тексте)\n"
+    if hasattr(user, 'status') and user.status:
+        info += f"🟢 Статус: {user.status}\n"
+
+    await status_msg.edit_text(info, parse_mode="Markdown")
+    await state.clear()
+
+# ---------- Команда /userinfo ----------
+@dp.message(Command("userinfo"))
+async def cmd_userinfo(message: types.Message, state: FSMContext):
+    args = message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await message.answer("Использование: /userinfo @username\nили нажмите кнопку 'Инфо о пользователе' и введите username.")
+        return
+    username = args[1].lstrip('@')
+    if not username:
+        await message.answer("❌ Вы не ввели username.")
+        return
+
+    status_msg = await message.answer(f"🔍 Ищу пользователя @{username}...")
+
+    try:
+        client = await get_telegram_client()
+        async with client:
+            user = await client.get_entity(username)
+    except ValueError:
+        await status_msg.edit_text(f"❌ Пользователь @{username} не найден.")
+        return
+    except Exception as e:
+        await status_msg.edit_text(f"❌ Ошибка: {e}")
+        return
+
+    info = f"👤 **Информация о пользователе @{user.username}**\n\n"
+    info += f"🆔 ID: `{user.id}`\n"
+    info += f"📛 Имя: {user.first_name or '—'}\n"
+    if user.last_name:
+        info += f"📛 Фамилия: {user.last_name}\n"
+    if user.bio:
+        info += f"📝 О себе: {user.bio}\n"
+    info += f"🤖 Бот: {'Да' if user.bot else 'Нет'}\n"
+    if hasattr(user, 'phone') and user.phone:
+        info += f"📞 Телефон: `{user.phone}`\n"
+    if user.photo:
+        info += f"🖼️ Фото: есть (не показывается в тексте)\n"
+    if hasattr(user, 'status') and user.status:
+        info += f"🟢 Статус: {user.status}\n"
+
+    await status_msg.edit_text(info, parse_mode="Markdown")
+
+# ---------- Запуск ----------
 async def main():
     logger.info("Бот запущен")
     await dp.start_polling(bot)
