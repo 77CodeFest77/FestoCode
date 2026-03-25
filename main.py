@@ -4,7 +4,7 @@ import time
 import os
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
-from aiohttp_socks import SocksConnector  # <-- добавлено
+from aiohttp_socks import SocksConnector  # правильно: aiohttp_socks
 
 # Получаем токен из переменной окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -36,7 +36,6 @@ async def fetch_proxies_from_sources():
             try:
                 async with session.get(url) as resp:
                     text = await resp.text()
-                    # Обрабатываем каждую строку
                     lines = text.strip().splitlines()
                     for line in lines:
                         line = line.strip()
@@ -45,7 +44,6 @@ async def fetch_proxies_from_sources():
                             if len(parts) >= 2:
                                 ip = parts[0].strip()
                                 port_str = parts[1].strip()
-                                # Проверяем, что порт — число
                                 if port_str.isdigit():
                                     all_proxies.add((ip, int(port_str)))
             except Exception:
@@ -53,9 +51,7 @@ async def fetch_proxies_from_sources():
     return list(all_proxies)
 
 async def check_proxy_speed(proxy_ip, proxy_port):
-    """Проверяет SOCKS5 прокси через aiohttp_socks"""
     start_time = time.time()
-    # Создаём SOCKS5-коннектор
     connector = SocksConnector.from_url(f"socks5://{proxy_ip}:{proxy_port}")
     timeout = aiohttp.ClientTimeout(total=10)
     try:
@@ -81,11 +77,10 @@ async def cmd_start(message: types.Message):
 @dp.callback_query(lambda c: c.data == "find_proxy")
 async def process_find_proxy(callback_query: types.CallbackQuery):
     await callback_query.message.answer("🔍 Поиск и проверка прокси...")
-
+    
     proxies = await fetch_proxies_from_sources()
     working_proxies = []
 
-    # Проверим первые 10 прокси (можно изменить лимит)
     for ip, port in proxies[:10]:
         is_working, speed = await check_proxy_speed(ip, port)
         if is_working:
