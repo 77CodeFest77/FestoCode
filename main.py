@@ -22,6 +22,17 @@ if GROQ_API_KEY:
 else:
     groq_client = None
 
+# Системный промпт
+DEFAULT_SYSTEM_PROMPT = os.getenv(
+    "AI_SYSTEM_PROMPT",
+    "Ты — дружелюбный и полезный ассистент. Отвечай кратко и по делу. "
+    "Не раскрывай, что ты ИИ, говори от первого лица."
+)
+system_prompt = DEFAULT_SYSTEM_PROMPT
+
+# Задержка ответа (по умолчанию 5 секунд)
+AI_RESPONSE_DELAY = float(os.getenv("AI_RESPONSE_DELAY", "5.0"))
+
 # Восстанавливаем сессию
 session_b64 = os.getenv("TELEGRAM_SESSION_B64")
 if session_b64 and not os.path.exists(SESSION_FILE):
@@ -35,9 +46,11 @@ games: Dict[int, dict] = {}
 pending_invites: Dict[int, dict] = {}
 invite_tasks: Dict[int, asyncio.Task] = {}
 ai_enabled: Dict[int, bool] = {}
-conversation_history: Dict[int, list] = {}  # храним последние 10 сообщений
+pending_ai_tasks: Dict[int, asyncio.Task] = {}
+last_message_text: Dict[int, str] = {}
+conversation_history: Dict[int, list] = {}
 
-# ---------- Класс игры (без изменений) ----------
+# ---------- Класс игры ----------
 class TicTacToe:
     def __init__(self, player1_id: int, player2_id):
         self.player1 = player1_id
@@ -151,20 +164,17 @@ async def update_invite_message(chat_id: int, msg_id: int, start_time: float):
 # ---------- Groq AI ----------
 async def get_ai_response(chat_id: int, user_message: str) -> str:
     if not groq_client:
-        return "❌ Groq API ключ не настроен. Добавьте GROQ_API_KEY в .env или секреты."
+        return "❌ Groq API ключ не настроен."
 
-    # Формируем историю диалога
     history = conversation_history.get(chat_id, [])
-    messages = [
-        {"role": "system", "content": "Ты — дружелюбный и полезный ассистент. Отвечай кратко и по делу."}
-    ]
-    for msg in history[-10:]:  # последние 10 сообщений
+    messages = [{"role": "system", "content": system_prompt}]
+    for msg in history[-10:]:
         messages.append(msg)
     messages.append({"role": "user", "content": user_message})
 
     try:
         completion = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",  # можно сменить на "mixtral-8x7b-32768" или "gemma2-9b-it"
+            model="llama-3.3-70b-versatile",
             messages=messages,
             temperature=0.7,
             max_tokens=500,
@@ -172,20 +182,40 @@ async def get_ai_response(chat_id: int, user_message: str) -> str:
         )
         reply = completion.choices[0].message.content
 
-        # Сохраняем в историю
         if chat_id not in conversation_history:
             conversation_history[chat_id] = []
         conversation_history[chat_id].append({"role": "user", "content": user_message})
         conversation_history[chat_id].append({"role": "assistant", "content": reply})
-        # Ограничиваем историю 20 сообщениями
         if len(conversation_history[chat_id]) > 20:
             conversation_history[chat_id] = conversation_history[chat_id][-20:]
 
         return reply
     except Exception as e:
-        return f"❌ Ошибка Groq: {e}"
+        return f"❌ Ошибка: {e}"
 
-# ---------- Команды игры (без изменений) ----------
+# ---------- Функция отложенного ответа ----------
+async def delayed_ai_response(chat_id: int, thinking_msg_id: int, user_message: str):
+    await asyncio.sleep(AI_RESPONSE_DELAY)
+
+    if pending_ai_tasks.get(chat_id) != asyncio.current_task():
+        return
+
+    del pending_ai_tasks[chat_id]
+
+    if chat_id in games:
+        return
+
+    last_msg = last_message_text.get(chat_id, user_message)
+    if not last_msg:
+        return
+
+    reply = await get_ai_response(chat_id, last_msg)
+    try:
+        await client.edit_message(chat_id, thinking_msg_id, reply)
+    except Exception:
+        await client.send_message(chat_id, reply)
+
+# ---------- Команды игры ----------
 @client.on(events.NewMessage(pattern=r'^/game\s+(@?\w+)'))
 async def game_command(event):
     args = event.raw_text.split(maxsplit=1)
@@ -288,22 +318,52 @@ async def cancel_command(event):
     else:
         await event.reply("Нет активной игры или приглашения.")
 
-# ---------- Команды ИИ ----------
+# ---------- Команды ИИ (только владелец) ----------
 @client.on(events.NewMessage(pattern=r'^/ai\s+(on|off)$'))
 async def ai_toggle_command(event):
+    me = await client.get_me()
+    if event.sender_id != me.id:
+        await event.reply("❌ Эта команда доступна только владельцу.")
+        return
     chat_id = event.chat_id
     action = event.raw_text.split()[1].lower()
     if action == "on":
         ai_enabled[chat_id] = True
-        await event.reply("🤖 ИИ (Groq) включён! Я буду отвечать на сообщения в этом чате.")
+        await event.reply("🤖 FestoCode включён!")
     else:
         ai_enabled[chat_id] = False
-        await event.reply("🤖 ИИ выключен.")
+        await event.reply("🤖 FestoCode выключен.")
+        if chat_id in pending_ai_tasks:
+            pending_ai_tasks[chat_id].cancel()
+            del pending_ai_tasks[chat_id]
         if chat_id in conversation_history:
             del conversation_history[chat_id]
+        if chat_id in last_message_text:
+            del last_message_text[chat_id]
+
+@client.on(events.NewMessage(pattern=r'^/set_prompt\s+(.+)$'))
+async def set_prompt_command(event):
+    me = await client.get_me()
+    if event.sender_id != me.id:
+        await event.reply("❌ Эта команда доступна только владельцу.")
+        return
+    global system_prompt
+    new_prompt = event.raw_text.split(maxsplit=1)[1].strip()
+    system_prompt = new_prompt
+    await event.reply(f"✅ Системный промпт обновлён:\n{new_prompt[:200]}...")
+
+@client.on(events.NewMessage(pattern=r'^/show_prompt$'))
+async def show_prompt_command(event):
+    me = await client.get_me()
+    if event.sender_id != me.id:
+        return
+    await event.reply(f"📝 Текущий системный промпт:\n{system_prompt}")
 
 @client.on(events.NewMessage(pattern=r'^/clear_history$'))
 async def clear_history_command(event):
+    me = await client.get_me()
+    if event.sender_id != me.id:
+        return
     chat_id = event.chat_id
     if chat_id in conversation_history:
         del conversation_history[chat_id]
@@ -353,7 +413,7 @@ async def handle_move(event):
             if game.winner or game.draw:
                 del games[chat_id]
 
-# ---------- Обработка сообщений для ИИ ----------
+# ---------- Обработка сообщений для ИИ (с задержкой и сообщением "Думаю...") ----------
 @client.on(events.NewMessage)
 async def handle_ai_response(event):
     if event.out:
@@ -374,19 +434,29 @@ async def handle_ai_response(event):
     if not user_message:
         return
 
-    thinking_msg = await event.reply("🤔 Думаю...")
-    reply = await get_ai_response(chat_id, user_message)
-    try:
-        await thinking_msg.edit(reply)
-    except Exception:
-        await event.reply(reply)
+    # Сохраняем последнее сообщение
+    last_message_text[chat_id] = user_message
+
+    # Отменяем предыдущий таймер, если был
+    if chat_id in pending_ai_tasks:
+        pending_ai_tasks[chat_id].cancel()
+        del pending_ai_tasks[chat_id]
+
+    # Отправляем "Думаю..."
+    thinking = await event.reply("🤔 Раздумываю...")
+
+    # Запускаем таймер
+    task = asyncio.create_task(delayed_ai_response(chat_id, thinking.id, user_message))
+    pending_ai_tasks[chat_id] = task
 
 # ---------- Запуск ----------
 async def main():
     await client.start()
-    print("✅ Userbot запущен. Команды:")
+    me = await client.get_me()
+    print(f"✅ Userbot запущен. Владелец: @{me.username} (ID: {me.id})")
+    print("Команды:")
     print("🎮 Игра: /game @username, /game_bot, /join, /cancel")
-    print("🤖 ИИ: /ai on, /ai off, /clear_history")
+    print("🤖 ИИ (только владелец): /ai on, /ai off, /set_prompt <текст>, /show_prompt, /clear_history")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
