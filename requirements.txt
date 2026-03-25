@@ -1,3 +1,3 @@
+pip install aiohttp-socks
 aiogram==3.5.0
 aiohttp
-pip install aiohttp-socks
