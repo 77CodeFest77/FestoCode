@@ -1,7 +1,8 @@
 import asyncio
 import aiohttp
 import os
-import time                              # добавлен импорт time
+import re
+import time                                     # <-- добавлен импорт time
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -15,12 +16,15 @@ if not BOT_TOKEN:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Источники прокси (SOCKS5, HTTP)
-PROXY_SOURCES = [
-    "https://www.proxy-list.download/api/v1/get?type=socks5",
-    "https://api.proxyscrape.com/v2/?request=getcountry&country=RU&protocol=socks5&timeout=1000",
-    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt",
+# Список популярных сайтов с прокси
+PROXY_SITES = [
+    "https://www.proxy-list.download/SOCKS5",
+    "https://free-proxy-list.net/",
+    "https://spys.me/socks.html",
 ]
+
+# Регулярное выражение для поиска IP:PORT
+IP_PORT_REGEX = r"\b(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}\b"
 
 # Клавиатура с кнопками
 def get_main_menu_keyboard():
@@ -38,21 +42,18 @@ def get_date_filter_keyboard():
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-async def fetch_proxies_from_sources():
+async def fetch_proxies_from_web():
     all_proxies = []
     async with aiohttp.ClientSession() as session:
-        for url in PROXY_SOURCES:
+        for url in PROXY_SITES:
             try:
                 async with session.get(url) as resp:
                     text = await resp.text()
-                    lines = text.strip().splitlines()
-                    for line in lines:
-                        line = line.strip()
-                        if ":" in line:                     # исправлен отступ
-                            ip_port = line.split(":")
-                            if len(ip_port) == 2:
-                                ip, port = ip_port
-                                all_proxies.append({"ip": ip, "port": int(port), "date": datetime.now()})
+                    # Ищем IP:PORT с помощью регулярного выражения
+                    matches = re.findall(IP_PORT_REGEX, text)
+                    for match in matches:
+                        ip, port = match.split(":")
+                        all_proxies.append({"ip": ip, "port": int(port), "date": datetime.now()})
             except Exception:
                 continue
     return all_proxies
@@ -97,8 +98,8 @@ async def process_date_filter(callback_query: types.CallbackQuery):
 
     await callback_query.message.answer(f"🔍 Поиск прокси за последние {days} дней...")
     
-    proxies = await fetch_proxies_from_sources()
-    working_proxies = []
+    proxies = await fetch_proxies_from_web()
+    working_proxies = []                                   # <-- исправлено: перенесено на новую строку
 
     for proxy in proxies:
         if proxy["date"] >= date_threshold:
