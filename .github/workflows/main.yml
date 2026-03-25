@@ -1,9 +1,7 @@
-name: Run Telegram Proxy Bot
+name: Run Game Bot
 
 on:
-  schedule:
-    - cron: '0 * * * *'
-  workflow_dispatch:
+  workflow_dispatch:      # запуск вручную (или можно добавить schedule)
 
 jobs:
   run-bot:
@@ -19,8 +17,4 @@ jobs:
       - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
-          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
-          TELEGRAM_SESSION_B64: ${{ secrets.TELEGRAM_SESSION_B64 }}
-          USE_TELEGRAM_SOURCES: "true"
         run: python main.py
