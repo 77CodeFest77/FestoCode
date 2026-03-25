@@ -2,18 +2,25 @@ import asyncio
 import os
 import base64
 import time
+import random
+import json
+import aiohttp
 from typing import Dict, Optional
 from telethon import TelegramClient, events
-from telethon.tl.types import Message
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# ---------- Конфигурация ----------
 API_ID = int(os.getenv("TELEGRAM_API_ID", "34126767"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "44f1cdcc4c6544d60fe06be1b319d2dd")
 SESSION_FILE = "session_name.session"
 
-# Восстанавливаем сессию из секрета, если есть
+# DeepSeek API
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+
+# Восстанавливаем сессию из секрета
 session_b64 = os.getenv("TELEGRAM_SESSION_B64")
 if session_b64 and not os.path.exists(SESSION_FILE):
     with open(SESSION_FILE, "wb") as f:
@@ -21,15 +28,18 @@ if session_b64 and not os.path.exists(SESSION_FILE):
 
 client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
 
-# Хранилища
-games: Dict[int, 'TicTacToe'] = {}               # активные игры
-pending_invites: Dict[int, dict] = {}            # ожидающие приглашения
-invite_tasks: Dict[int, asyncio.Task] = {}       # задачи таймера
+# ---------- Хранилища ----------
+games: Dict[int, dict] = {}                 # активные игры
+pending_invites: Dict[int, dict] = {}       # ожидающие приглашения
+invite_tasks: Dict[int, asyncio.Task] = {}  # задачи таймера
+ai_enabled: Dict[int, bool] = {}            # включён ли ИИ в чате
+conversation_history: Dict[int, list] = {}  # история диалогов для контекста
 
+# ---------- Класс игры (без изменений) ----------
 class TicTacToe:
     def __init__(self, player1_id: int, player2_id):
         self.player1 = player1_id
-        self.player2 = player2_id          # может быть "bot" или id пользователя
+        self.player2 = player2_id
         self.board = [None] * 9
         self.current_player = player1_id
         self.winner = None
@@ -95,7 +105,7 @@ class TicTacToe:
         current = "бот" if self.current_player == "bot" else self.current_player
         return f"Ход: {current}"
 
-# ---------- Хелперы для таймера ----------
+# ---------- Вспомогательные функции ----------
 def format_time(seconds_left: int) -> str:
     m, s = divmod(seconds_left, 60)
     return f"{m:02d}:{s:02d}"
@@ -105,13 +115,23 @@ def progress_bar(seconds_left: int, total_seconds: int = 300) -> str:
     filled = int(10 * percent)
     return "█" * filled + "░" * (10 - filled)
 
+async def update_game_message(chat_id: int, game: TicTacToe):
+    """Обновляет игровое сообщение"""
+    data = games.get(chat_id)
+    if not data or not data.get('game_msg_id'):
+        return
+    text = f"{game.render_board()}\n\n{game.get_status()}"
+    try:
+        await client.edit_message(chat_id, data['game_msg_id'], text)
+    except Exception:
+        pass
+
 async def update_invite_message(chat_id: int, msg_id: int, start_time: float):
     """Обновляет сообщение с приглашением каждую секунду."""
     while True:
         elapsed = time.time() - start_time
         seconds_left = max(0, 300 - int(elapsed))
         if seconds_left <= 0:
-            # время вышло
             if chat_id in pending_invites:
                 del pending_invites[chat_id]
             await client.edit_message(chat_id, msg_id, "⏰ Время приглашения истекло.")
@@ -125,11 +145,65 @@ async def update_invite_message(chat_id: int, msg_id: int, start_time: float):
         try:
             await client.edit_message(chat_id, msg_id, text)
         except Exception:
-            # сообщение могло быть удалено
             break
         await asyncio.sleep(1)
 
-# ---------- Команды ----------
+# ---------- DeepSeek API ----------
+async def get_ai_response(chat_id: int, user_message: str) -> str:
+    """Отправляет запрос к DeepSeek API и возвращает ответ"""
+    if not DEEPSEEK_API_KEY:
+        return "❌ API-ключ DeepSeek не настроен. Добавьте DEEPSEEK_API_KEY в .env"
+
+    # Получаем историю чата (последние 10 сообщений)
+    history = conversation_history.get(chat_id, [])
+    messages = [
+        {"role": "system", "content": "Ты — дружелюбный и полезный ассистент. Отвечай кратко и по делу."}
+    ]
+    # Добавляем историю
+    for msg in history[-10:]:
+        messages.append(msg)
+    # Добавляем текущее сообщение
+    messages.append({"role": "user", "content": user_message})
+
+    payload = {
+        "model": "deepseek-chat",  # или deepseek-reasoner для сложных задач
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 500
+    }
+
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(DEEPSEEK_API_URL, json=payload, headers=headers, timeout=30) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    reply = data["choices"][0]["message"]["content"]
+
+                    # Сохраняем в историю
+                    if chat_id not in conversation_history:
+                        conversation_history[chat_id] = []
+                    conversation_history[chat_id].append({"role": "user", "content": user_message})
+                    conversation_history[chat_id].append({"role": "assistant", "content": reply})
+
+                    # Ограничиваем историю 20 сообщениями
+                    if len(conversation_history[chat_id]) > 20:
+                        conversation_history[chat_id] = conversation_history[chat_id][-20:]
+
+                    return reply
+                else:
+                    error_text = await resp.text()
+                    return f"❌ Ошибка API: {resp.status}\n{error_text[:200]}"
+    except asyncio.TimeoutError:
+        return "❌ Таймаут при обращении к DeepSeek API"
+    except Exception as e:
+        return f"❌ Ошибка: {e}"
+
+# ---------- Команды игры ----------
 @client.on(events.NewMessage(pattern=r'^/game\s+(@?\w+)'))
 async def game_command(event):
     args = event.raw_text.split(maxsplit=1)
@@ -154,7 +228,6 @@ async def game_command(event):
         await event.reply("В этом чате уже идёт игра. Дождитесь её окончания.")
         return
 
-    # Отправляем сообщение с приглашением
     msg = await event.reply(f"🎮 Вы пригласили @{target} сыграть. Ожидание...")
     start_time = time.time()
     pending_invites[chat_id] = {
@@ -164,7 +237,6 @@ async def game_command(event):
         'msg_id': msg.id,
         'start_time': start_time
     }
-    # Запускаем задачу обновления сообщения
     task = asyncio.create_task(update_invite_message(chat_id, msg.id, start_time))
     invite_tasks[chat_id] = task
 
@@ -180,24 +252,22 @@ async def join_command(event):
         await event.reply("Это приглашение не для вас.")
         return
 
-    # Останавливаем таймер
     if chat_id in invite_tasks:
         invite_tasks[chat_id].cancel()
         del invite_tasks[chat_id]
 
-    # Удаляем сообщение-приглашение
     try:
         await client.delete_messages(chat_id, invite['msg_id'])
     except:
         pass
 
     game = TicTacToe(invite['player1'], invite['player2'])
-    games[chat_id] = game
+    game_msg = await client.send_message(chat_id, "🎮 Игра началась!\n" + game.render_board() + "\n\n" + game.get_status())
+    games[chat_id] = {
+        'game': game,
+        'game_msg_id': game_msg.id
+    }
     del pending_invites[chat_id]
-
-    await client.send_message(chat_id, f"🎉 Игра началась! Первым ходит {invite['player1']}.")
-    await client.send_message(chat_id, game.render_board())
-    await client.send_message(chat_id, game.get_status())
 
 @client.on(events.NewMessage(pattern=r'^/game_bot$'))
 async def game_bot_command(event):
@@ -207,16 +277,16 @@ async def game_bot_command(event):
         return
     player_id = event.sender_id
     game = TicTacToe(player_id, "bot")
-    games[chat_id] = game
-    await event.reply("🤖 Начинаем игру с ботом! Ваш ход (X).")
-    await event.reply(game.render_board())
-    await event.reply(game.get_status())
+    game_msg = await event.reply("🤖 Начинаем игру с ботом!\n" + game.render_board() + "\n\n" + game.get_status())
+    games[chat_id] = {
+        'game': game,
+        'game_msg_id': game_msg.id
+    }
 
 @client.on(events.NewMessage(pattern=r'^/cancel$'))
 async def cancel_command(event):
     chat_id = event.chat_id
     if chat_id in pending_invites:
-        # отменяем приглашение
         if chat_id in invite_tasks:
             invite_tasks[chat_id].cancel()
             del invite_tasks[chat_id]
@@ -227,76 +297,132 @@ async def cancel_command(event):
         del pending_invites[chat_id]
         await event.reply("Приглашение отменено.")
     elif chat_id in games:
+        try:
+            await client.delete_messages(chat_id, games[chat_id]['game_msg_id'])
+        except:
+            pass
         del games[chat_id]
         await event.reply("Игра отменена.")
     else:
         await event.reply("Нет активной игры или приглашения.")
 
+# ---------- Команды ИИ ----------
+@client.on(events.NewMessage(pattern=r'^/ai\s+(on|off)$'))
+async def ai_toggle_command(event):
+    chat_id = event.chat_id
+    action = event.raw_text.split()[1].lower()
+    if action == "on":
+        ai_enabled[chat_id] = True
+        await event.reply("🤖 ИИ включён! Я буду отвечать на сообщения в этом чате.")
+    else:
+        ai_enabled[chat_id] = False
+        await event.reply("🤖 ИИ выключен.")
+        # Очищаем историю
+        if chat_id in conversation_history:
+            del conversation_history[chat_id]
+
+@client.on(events.NewMessage(pattern=r'^/clear_history$'))
+async def clear_history_command(event):
+    chat_id = event.chat_id
+    if chat_id in conversation_history:
+        del conversation_history[chat_id]
+        await event.reply("🧹 История диалога очищена.")
+    else:
+        await event.reply("История и так пуста.")
+
+# ---------- Обработка ходов игры ----------
 @client.on(events.NewMessage)
 async def handle_move(event):
     chat_id = event.chat_id
     if chat_id not in games:
         return
-    game = games[chat_id]
+    data = games[chat_id]
+    game = data['game']
     player_id = event.sender_id
 
-    # Игра с ботом: если ход бота, игнорируем сообщения игрока, пока бот не сходит
     if game.is_bot_game and player_id != game.player1:
-        # игрок не участвует (это не игрок)
-        await event.reply("Вы не участвуете в текущей игре.")
-        return
+        return  # не игрок
 
-    # Проверка, чей ход
     if player_id != game.current_player and not (game.is_bot_game and game.current_player == "bot"):
-        await event.reply("Сейчас не ваш ход.")
         return
 
-    # Парсим число
     try:
         pos = int(event.raw_text.strip())
         if pos < 1 or pos > 9:
             raise ValueError
     except ValueError:
-        await event.reply("Введите число от 1 до 9, соответствующее клетке.")
-        return
+        return  # не число или не 1-9 — возможно, это сообщение для ИИ
 
     if not game.make_move(player_id, pos):
-        await event.reply("Неверный ход. Клетка занята или игра уже закончена.")
         return
 
-    # Обновляем отображение
-    await event.reply(game.render_board())
-    status = game.get_status()
-    await event.reply(status)
+    await update_game_message(chat_id, game)
 
     if game.winner or game.draw:
         del games[chat_id]
         return
 
-    # Если игра с ботом и теперь ход бота
     if game.is_bot_game and game.current_player == "bot":
-        await event.reply("🤖 Бот думает...")
-        await asyncio.sleep(1)  # небольшая пауза
-        # Бот ходит случайным образом
-        import random
+        await asyncio.sleep(1)
         empty = [i+1 for i, cell in enumerate(game.board) if cell is None]
         if empty:
             bot_move = random.choice(empty)
             game.make_move("bot", bot_move)
-            await event.reply(game.render_board())
-            status = game.get_status()
-            await event.reply(status)
+            await update_game_message(chat_id, game)
             if game.winner or game.draw:
                 del games[chat_id]
-                return
 
+# ---------- Обработка обычных сообщений для ИИ ----------
+@client.on(events.NewMessage)
+async def handle_ai_response(event):
+    """Отвечает на сообщения через DeepSeek, если ИИ включён и нет активной игры"""
+    if event.out:  # игнорируем свои сообщения
+        return
+
+    chat_id = event.chat_id
+    user_message = event.raw_text.strip()
+
+    # Игнорируем команды
+    if user_message.startswith('/'):
+        return
+
+    # Игнорируем, если ИИ выключен
+    if not ai_enabled.get(chat_id, False):
+        return
+
+    # Игнорируем, если идёт игра
+    if chat_id in games:
+        return
+
+    # Не отвечаем на пустые сообщения
+    if not user_message:
+        return
+
+    # Показываем, что ИИ думает
+    thinking_msg = await event.reply("🤔 Думаю...")
+
+    # Получаем ответ от DeepSeek
+    reply = await get_ai_response(chat_id, user_message)
+
+    # Обновляем сообщение с ответом
+    try:
+        await thinking_msg.edit(reply)
+    except Exception:
+        await event.reply(reply)
+
+# ---------- Запуск ----------
 async def main():
     await client.start()
-    print("✅ Userbot запущен. Играйте командами:")
-    print("/game @username  – пригласить другого игрока")
-    print("/game_bot        – сыграть с ботом")
-    print("/join            – принять приглашение")
-    print("/cancel          – отменить игру или приглашение")
+    print("✅ Userbot запущен. Доступные команды:")
+    print("🎮 Игра:")
+    print("   /game @username  – пригласить другого игрока")
+    print("   /game_bot        – сыграть с ботом")
+    print("   /join            – принять приглашение")
+    print("   /cancel          – отменить игру или приглашение")
+    print("🤖 ИИ:")
+    print("   /ai on           – включить ИИ в этом чате")
+    print("   /ai off          – выключить ИИ")
+    print("   /clear_history   – очистить историю диалога")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
