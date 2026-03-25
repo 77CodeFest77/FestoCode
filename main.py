@@ -1,7 +1,7 @@
 """
 Telegram бот для поиска:
 - рабочих SOCKS5/HTTP прокси
-- VPN ботов с пробным периодом (из Telegram-каналов)
+- VPN ботов с пробным периодом (автоматическая проверка)
 """
 
 import asyncio
@@ -21,6 +21,7 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
 from telethon import TelegramClient
+from telethon.errors import FloodWaitError
 
 load_dotenv()
 
@@ -39,6 +40,7 @@ MAX_PROXIES_TO_CHECK = int(os.getenv("MAX_PROXIES_TO_CHECK", "20"))
 CONCURRENT_CHECKS = int(os.getenv("CONCURRENT_CHECKS", "5"))
 PROXY_CHECK_TIMEOUT = int(os.getenv("PROXY_CHECK_TIMEOUT", "10"))
 PROXY_CHECK_URL = os.getenv("PROXY_CHECK_URL", "http://httpbin.org/ip")
+MAX_VPN_BOTS_TO_CHECK = int(os.getenv("MAX_VPN_BOTS_TO_CHECK", "10"))  # ограничиваем количество ботов для проверки
 
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN не задан!")
@@ -50,7 +52,7 @@ if USE_TELEGRAM_SOURCES:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ---------- Конфигурация источников ----------
+# ---------- Конфигурация ----------
 WEB_PROXY_SOURCES = [
     {"url": "https://www.proxy-list.download/api/v1/get?type=socks5", "parser": "line_ip_port"},
     {"url": "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=10000&country=all", "parser": "line_ip_port"},
@@ -58,19 +60,19 @@ WEB_PROXY_SOURCES = [
 ]
 
 TELEGRAM_PROXY_CHANNELS = [
-    "socks5_proxies",          # замените на реальные каналы
+    "socks5_proxies",          # замените на реальные каналы с прокси
     "free_proxy_list",
 ]
 
-# Каналы, где ищем VPN ботов
+# ЗДЕСЬ УКАЖИТЕ РЕАЛЬНЫЕ КАНАЛЫ, ГДЕ ПУБЛИКУЮТ VPN-БОТОВ
 VPN_BOT_CHANNELS = [
-    "vpn_bots",                # пример
+    "vpn_bot_list",            # пример, замените на существующие
     "free_vpn_bots",
 ]
 
 IP_PORT_REGEX = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}\b")
 BOT_LINK_REGEX = re.compile(r"@[a-zA-Z0-9_]{5,32}\b|https?://t\.me/[a-zA-Z0-9_]{5,32}\b")
-VPN_KEYWORDS = re.compile(r"(VPN|vpn|пробный|бесплатный|free|trial)", re.IGNORECASE)
+VPN_KEYWORDS = re.compile(r"(VPN|vpn|пробный|бесплатный|free|trial|demo|тестовый|промо)", re.IGNORECASE)
 
 SESSION_FILE = "session_name.session"
 
@@ -98,7 +100,7 @@ async def get_telegram_client() -> TelegramClient:
     await client.disconnect()
     sys.exit(0)
 
-# ---------- Парсинг веб-источников ----------
+# ---------- Парсинг веб-источников (прокси) ----------
 async def parse_web_source(session: aiohttp.ClientSession, source: Dict) -> List[Dict]:
     proxies = []
     try:
@@ -125,7 +127,6 @@ async def fetch_proxies_from_web() -> List[Dict]:
         for res in results:
             if isinstance(res, list):
                 all_proxies.extend(res)
-    # Удаление дубликатов
     unique = {}
     for p in all_proxies:
         key = f"{p['ip']}:{p['port']}"
@@ -160,7 +161,7 @@ async def fetch_proxies_from_telegram() -> List[Dict]:
 
 # ---------- Парсинг VPN ботов из Telegram ----------
 async def fetch_vpn_bots_from_telegram() -> List[Dict]:
-    """Ищет в каналах сообщения с ключевыми словами (VPN, пробный) и извлекает ссылки на ботов."""
+    """Ищет в каналах сообщения с ключевыми словами и извлекает ссылки на ботов."""
     client = await get_telegram_client()
     async with client:
         bots = []
@@ -171,18 +172,21 @@ async def fetch_vpn_bots_from_telegram() -> List[Dict]:
                     if not msg.date or msg.date < datetime.now() - timedelta(days=7):
                         continue
                     if msg.text and VPN_KEYWORDS.search(msg.text):
-                        # Ищем ссылки на ботов
                         links = BOT_LINK_REGEX.findall(msg.text)
                         for link in links:
+                            # Приводим ссылку к формату @username
+                            if link.startswith("https://t.me/"):
+                                username = link.split("/")[-1]
+                                link = f"@{username}"
                             bots.append({
                                 "link": link,
                                 "source": f"telegram:{channel}",
                                 "date": msg.date,
-                                "text": msg.text[:200]  # небольшой отрывок для контекста
+                                "text": msg.text[:200]
                             })
             except Exception as e:
-                logger.error(f"Ошибка получения VPN ботов из {channel}: {e}")
-        # Убираем дубликаты ссылок
+                logger.error(f"Ошибка получения из {channel}: {e}")
+        # Убираем дубликаты
         unique = {}
         for b in bots:
             key = b["link"]
@@ -190,9 +194,55 @@ async def fetch_vpn_bots_from_telegram() -> List[Dict]:
                 unique[key] = b
         return list(unique.values())
 
+# ---------- Проверка одного VPN бота (отправка /start) ----------
+async def check_one_vpn_bot(bot_link: str, client: TelegramClient) -> Tuple[str, str, bool]:
+    """
+    Отправляет /start указанному боту и возвращает (username, текст_ответа, has_trial).
+    """
+    try:
+        entity = await client.get_entity(bot_link)
+        # Отправляем /start в диалоге с ботом
+        async with client.conversation(entity, timeout=30) as conv:
+            await conv.send_message('/start')
+            response = await conv.get_response()
+            response_text = response.text if response.text else "(нет текста)"
+            # Проверяем наличие ключевых слов в ответе
+            has_trial = bool(VPN_KEYWORDS.search(response_text))
+            return bot_link, response_text, has_trial
+    except FloodWaitError as e:
+        logger.warning(f"Flood wait {e.seconds} seconds for bot {bot_link}")
+        await asyncio.sleep(e.seconds)
+        return bot_link, "Flood wait", False
+    except Exception as e:
+        logger.error(f"Ошибка при проверке бота {bot_link}: {e}")
+        return bot_link, f"Ошибка: {e}", False
+
+async def check_vpn_bots(bots: List[Dict], progress_callback=None) -> List[Dict]:
+    """
+    Проверяет список ботов, отправляя /start каждому.
+    Возвращает список результатов с полями: link, response, has_trial.
+    """
+    client = await get_telegram_client()
+    async with client:
+        results = []
+        for i, bot_info in enumerate(bots[:MAX_VPN_BOTS_TO_CHECK]):
+            link = bot_info["link"]
+            logger.info(f"Проверяю бота {link}...")
+            link, resp, has_trial = await check_one_vpn_bot(link, client)
+            results.append({
+                "link": link,
+                "response": resp,
+                "has_trial": has_trial,
+                "source": bot_info["source"]
+            })
+            if progress_callback:
+                await progress_callback(i+1, len(bots[:MAX_VPN_BOTS_TO_CHECK]))
+            # Небольшая задержка между запросами, чтобы не нагружать сервер
+            await asyncio.sleep(1)
+        return results
+
 # ---------- Проверка прокси (SOCKS5) ----------
 async def check_proxy_socks5(proxy_ip: str, proxy_port: int) -> Tuple[bool, float, bool]:
-    """Проверяет SOCKS5 прокси через aiohttp_socks"""
     start = time.time()
     connector = SocksConnector.from_url(f"socks5://{proxy_ip}:{proxy_port}")
     timeout = aiohttp.ClientTimeout(total=PROXY_CHECK_TIMEOUT)
@@ -242,7 +292,7 @@ async def check_proxies_batch(proxies: List[Dict], progress_callback=None) -> Li
 def get_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔍 Найти прокси", callback_data="find_proxy")],
-        [InlineKeyboardButton(text="🤖 Найти VPN ботов", callback_data="find_vpn")],
+        [InlineKeyboardButton(text="🤖 Найти VPN ботов (с проверкой)", callback_data="find_vpn")],
         [InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")]
     ])
 
@@ -252,7 +302,7 @@ async def cmd_start(message: types.Message):
     await message.answer(
         "👋 Привет! Я могу:\n"
         "• Найти рабочие SOCKS5 прокси\n"
-        "• Найти VPN ботов с пробным периодом в Telegram\n\n"
+        "• Найти VPN ботов в Telegram и автоматически проверить наличие пробного периода\n\n"
         "Выбери действие:",
         reply_markup=get_main_keyboard()
     )
@@ -276,17 +326,19 @@ async def callback_about(callback: types.CallbackQuery):
         "ℹ️ **О боте**\n\n"
         "**Прокси:** собираются из веб-источников и Telegram-каналов.\n"
         "Проверяются SOCKS5 прокси на скорость и анонимность.\n\n"
-        "**VPN боты:** ищутся в Telegram-каналах по ключевым словам (VPN, пробный, бесплатный).\n"
-        "Выводятся ссылки на ботов и фрагменты сообщений.\n\n"
+        "**VPN боты:** собираются из Telegram-каналов, затем каждому отправляется `/start`.\n"
+        "Если в ответе есть ключевые слова (пробный, бесплатный, trial и т.п.), бот отмечается как имеющий пробный период.\n\n"
+        "⚠️ *Внимание:* автоматическая проверка ботов может занимать время и подвержена ограничениям Telegram.\n\n"
         "⚙️ Настройки:\n"
         f"• Максимум прокси для проверки: {MAX_PROXIES_TO_CHECK}\n"
+        f"• Максимум VPN ботов для проверки: {MAX_VPN_BOTS_TO_CHECK}\n"
         f"• Параллельных проверок: {CONCURRENT_CHECKS}\n"
         f"• Таймаут проверки: {PROXY_CHECK_TIMEOUT} сек\n\n"
         "Исходный код в репозитории.",
         parse_mode="Markdown"
     )
 
-# ---------- Поиск прокси (фоновая задача) ----------
+# ---------- Поиск прокси ----------
 async def update_progress(chat_id: int, msg_id: int, current: int, total: int):
     text = f"🔍 Проверено {current} из {total} прокси..."
     await bot.edit_message_text(text=text, chat_id=chat_id, message_id=msg_id)
@@ -311,7 +363,6 @@ async def search_and_send_proxy(user_id: int, chat_id: int, status_msg_id: int):
             )
             return
 
-        # Удаление дубликатов
         unique = {}
         for p in all_proxies:
             key = f"{p['ip']}:{p['port']}"
@@ -367,7 +418,11 @@ async def search_and_send_proxy(user_id: int, chat_id: int, status_msg_id: int):
             message_id=status_msg_id
         )
 
-# ---------- Поиск VPN ботов ----------
+# ---------- Поиск и проверка VPN ботов ----------
+async def update_vpn_progress(chat_id: int, msg_id: int, current: int, total: int):
+    text = f"🤖 Проверено {current} из {total} ботов..."
+    await bot.edit_message_text(text=text, chat_id=chat_id, message_id=msg_id)
+
 async def search_and_send_vpn(user_id: int, chat_id: int, status_msg_id: int):
     try:
         await bot.edit_message_text(
@@ -383,21 +438,45 @@ async def search_and_send_vpn(user_id: int, chat_id: int, status_msg_id: int):
             )
             return
 
+        # Собираем ссылки из каналов
         bots = await fetch_vpn_bots_from_telegram()
         if not bots:
             await bot.edit_message_text(
-                text="❌ Не найдено VPN ботов в указанных каналах.",
+                text="❌ Не найдено VPN ботов в указанных каналах. Проверьте настройки каналов.",
                 chat_id=chat_id,
                 message_id=status_msg_id
             )
             return
 
-        response = "🤖 **Найдены VPN боты с пробным периодом:**\n\n"
-        for b in bots[:10]:  # не больше 10
-            response += f"🔗 {b['link']}\n"
-            response += f"📢 *{b['source']}*\n"
-            response += f"📝 {b['text'][:100]}...\n\n"
-        response += "⚠️ Пробный период может быть ограничен. Уточняйте условия у ботов."
+        # Ограничиваем количество для проверки
+        bots_to_check = bots[:MAX_VPN_BOTS_TO_CHECK]
+        await bot.edit_message_text(
+            text=f"📦 Найдено {len(bots)} ботов, проверяю {len(bots_to_check)}...",
+            chat_id=chat_id,
+            message_id=status_msg_id
+        )
+
+        # Проверяем каждого бота (отправляем /start)
+        results = await check_vpn_bots(
+            bots_to_check,
+            progress_callback=lambda cur, total: update_vpn_progress(chat_id, status_msg_id, cur, total)
+        )
+
+        # Формируем ответ
+        if results:
+            response = "🤖 **Результаты проверки VPN ботов:**\n\n"
+            for r in results:
+                emoji = "✅" if r["has_trial"] else "❌"
+                response += f"{emoji} {r['link']}\n"
+                if r["has_trial"]:
+                    # Показываем фрагмент ответа
+                    short_response = r["response"][:100].replace("\n", " ")
+                    response += f"   📝 *Ответ:* {short_response}...\n"
+                response += f"   📡 *Источник:* {r['source']}\n\n"
+            response += "⚠️ *Примечание:* Проверка проводилась отправкой `/start`. "
+            response += "Если бот использует кнопки, ответ может быть неполным."
+        else:
+            response = "❌ Не удалось проверить ни одного бота."
 
         await bot.edit_message_text(
             text=response,
