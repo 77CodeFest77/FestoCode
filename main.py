@@ -1,26 +1,29 @@
 import asyncio
-import aiohttp
 import os
 import re
-import time                                     # <-- добавлен импорт time
+import time
+import aiohttp
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from telethon import TelegramClient
+from telethon.errors import SessionPasswordNeededError
 
 # Получаем токен из переменной окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+API_ID = int(os.getenv("TELEGRAM_API_ID"))  # ID вашего аккаунта Telegram
+API_HASH = os.getenv("TELEGRAM_API_HASH")  # Hash вашего аккаунта Telegram
 
-if not BOT_TOKEN:
-    raise ValueError("Не указан BOT_TOKEN в переменных окружения!")
+if not BOT_TOKEN or not API_ID or not API_HASH:
+    raise ValueError("Не указаны TELEGRAM_API_ID, TELEGRAM_API_HASH или BOT_TOKEN!")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Список популярных сайтов с прокси
-PROXY_SITES = [
-    "https://www.proxy-list.download/SOCKS5",
-    "https://free-proxy-list.net/",
-    "https://spys.me/socks.html",
+# Список популярных каналов с прокси
+PROXY_CHANNELS = [
+    "socks5_proxies",  # Пример имени канала
+    "free_proxy_list",
 ]
 
 # Регулярное выражение для поиска IP:PORT
@@ -34,28 +37,22 @@ def get_main_menu_keyboard():
     ]
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-def get_date_filter_keyboard():
-    keyboard = [
-        [types.InlineKeyboardButton(text="📅 За день", callback_data="date_1")],
-        [types.InlineKeyboardButton(text="📅 За 3 дня", callback_data="date_3")],
-        [types.InlineKeyboardButton(text="📅 За неделю", callback_data="date_7")],
-    ]
-    return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-async def fetch_proxies_from_web():
+async def fetch_proxies_from_telegram():
     all_proxies = []
-    async with aiohttp.ClientSession() as session:
-        for url in PROXY_SITES:
+    async with TelegramClient("session_name", API_ID, API_HASH) as client:
+        for channel in PROXY_CHANNELS:
             try:
-                async with session.get(url) as resp:
-                    text = await resp.text()
-                    # Ищем IP:PORT с помощью регулярного выражения
-                    matches = re.findall(IP_PORT_REGEX, text)
-                    for match in matches:
-                        ip, port = match.split(":")
-                        all_proxies.append({"ip": ip, "port": int(port), "date": datetime.now()})
-            except Exception:
-                continue
+                # Получаем последние 100 сообщений из канала
+                messages = await client.get_messages(channel, limit=100)
+                for message in messages:
+                    if message.date > datetime.now() - timedelta(days=1):  # Только за последние 24 часа
+                        if message.text:  # Проверка, что сообщение содержит текст
+                            matches = re.findall(IP_PORT_REGEX, message.text)
+                            for match in matches:
+                                ip, port = match.split(":")
+                                all_proxies.append({"ip": ip, "port": int(port), "date": message.date})
+            except Exception as e:
+                print(f"Ошибка при получении сообщений из канала {channel}: {e}")
     return all_proxies
 
 async def check_proxy(proxy_ip, proxy_port):
@@ -88,29 +85,20 @@ async def cmd_start(message: types.Message):
 
 @dp.callback_query(lambda c: c.data == "find_proxy")
 async def process_find_proxy(callback_query: types.CallbackQuery):
-    await callback_query.message.answer("📅 Выберите дату публикации прокси:", reply_markup=get_date_filter_keyboard())
-    await callback_query.answer()
-
-@dp.callback_query(lambda c: c.data.startswith("date_"))
-async def process_date_filter(callback_query: types.CallbackQuery):
-    days = int(callback_query.data.split("_")[1])
-    date_threshold = datetime.now() - timedelta(days=days)
-
-    await callback_query.message.answer(f"🔍 Поиск прокси за последние {days} дней...")
+    await callback_query.message.answer("🔍 Поиск прокси в Telegram...")
     
-    proxies = await fetch_proxies_from_web()
-    working_proxies = []                                   # <-- исправлено: перенесено на новую строку
+    proxies = await fetch_proxies_from_telegram()
+    working_proxies = []
 
     for proxy in proxies:
-        if proxy["date"] >= date_threshold:
-            is_working, speed, is_anonymous = await check_proxy(proxy["ip"], proxy["port"])
-            if is_working:
-                working_proxies.append({
-                    "ip": proxy["ip"],
-                    "port": proxy["port"],
-                    "speed": speed,
-                    "is_anonymous": is_anonymous
-                })
+        is_working, speed, is_anonymous = await check_proxy(proxy["ip"], proxy["port"])
+        if is_working:
+            working_proxies.append({
+                "ip": proxy["ip"],
+                "port": proxy["port"],
+                "speed": speed,
+                "is_anonymous": is_anonymous
+            })
 
     if working_proxies:
         best_proxy = min(working_proxies, key=lambda x: x["speed"])
