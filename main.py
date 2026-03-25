@@ -1,25 +1,66 @@
+import asyncio
+import aiohttp
+import time
+import os
+from aiogram import Bot, Dispatcher, types
+from aiogram.filters import Command
+from aiohttp_socks import SocksConnector  # <-- добавлено
+
+# Получаем токен из переменной окружения
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+if not BOT_TOKEN:
+    raise ValueError("Не указан BOT_TOKEN в переменных окружения!")
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+# Источники прокси (только SOCKS5)
+PROXY_SOURCES = [
+    "https://www.proxy-list.download/api/v1/get?type=socks5",
+    "https://api.proxyscrape.com/v2/?request=getcountry&country=RU&protocol=socks5&timeout=1000",
+    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt",
+]
+
+def get_main_menu_keyboard():
+    keyboard = [
+        [types.InlineKeyboardButton(text="🔍 Найти прокси", callback_data="find_proxy")],
+        [types.InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")],
+    ]
+    return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+async def fetch_proxies_from_sources():
+    all_proxies = set()
+    async with aiohttp.ClientSession() as session:
+        for url in PROXY_SOURCES:
+            try:
                 async with session.get(url) as resp:
                     text = await resp.text()
-                    # Простой парсинг строк вида IP:PORT
-                    lines = text.strip().splitlines()                    for line in lines:
+                    # Обрабатываем каждую строку
+                    lines = text.strip().splitlines()
+                    for line in lines:
                         line = line.strip()
                         if ":" in line:
-                            ip_port = line.split(":")
-                            if len(ip_port) == 2:
-                                ip, port = ip_port
-                                all_proxies.add((ip, int(port)))
+                            parts = line.split(":")
+                            if len(parts) >= 2:
+                                ip = parts[0].strip()
+                                port_str = parts[1].strip()
+                                # Проверяем, что порт — число
+                                if port_str.isdigit():
+                                    all_proxies.add((ip, int(port_str)))
             except Exception:
                 continue
     return list(all_proxies)
 
 async def check_proxy_speed(proxy_ip, proxy_port):
+    """Проверяет SOCKS5 прокси через aiohttp_socks"""
     start_time = time.time()
+    # Создаём SOCKS5-коннектор
+    connector = SocksConnector.from_url(f"socks5://{proxy_ip}:{proxy_port}")
+    timeout = aiohttp.ClientTimeout(total=10)
     try:
-        connector = aiohttp.TCPConnector(limit=1)
-        timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            proxy_url = f"http://{proxy_ip}:{proxy_port}"
-            async with session.get('http://httpbin.org/ip', proxy=proxy_url) as resp:
+            async with session.get('http://httpbin.org/ip') as resp:
                 if resp.status == 200:
                     end_time = time.time()
                     speed = round(end_time - start_time, 2)
@@ -40,17 +81,19 @@ async def cmd_start(message: types.Message):
 @dp.callback_query(lambda c: c.data == "find_proxy")
 async def process_find_proxy(callback_query: types.CallbackQuery):
     await callback_query.message.answer("🔍 Поиск и проверка прокси...")
-    
+
     proxies = await fetch_proxies_from_sources()
     working_proxies = []
 
-    for ip, port in proxies[:10]:  # Проверим первые 10
+    # Проверим первые 10 прокси (можно изменить лимит)
+    for ip, port in proxies[:10]:
         is_working, speed = await check_proxy_speed(ip, port)
         if is_working:
             working_proxies.append({"ip": ip, "port": port, "speed": speed})
 
     if working_proxies:
-        best_proxy = min(working_proxies, key=lambda x: x["speed"])        response = (
+        best_proxy = min(working_proxies, key=lambda x: x["speed"])
+        response = (
             f"✅ Найден рабочий прокси:\n"
             f"🌐 IP: {best_proxy['ip']}\n"
             f"🔌 Порт: {best_proxy['port']}\n"
