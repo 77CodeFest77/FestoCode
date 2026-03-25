@@ -3,11 +3,10 @@ import os
 import base64
 import time
 import random
-import json
-import aiohttp
-from typing import Dict, Optional
+from typing import Dict
 from telethon import TelegramClient, events
 from dotenv import load_dotenv
+import google.generativeai as genai
 
 load_dotenv()
 
@@ -16,11 +15,15 @@ API_ID = int(os.getenv("TELEGRAM_API_ID", "34126767"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "44f1cdcc4c6544d60fe06be1b319d2dd")
 SESSION_FILE = "session_name.session"
 
-# DeepSeek API
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
-DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+# Gemini API
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    gemini_model = genai.GenerativeModel('gemini-2.0-flash-lite')  # или gemini-1.5-flash
+else:
+    gemini_model = None
 
-# Восстанавливаем сессию из секрета
+# Восстанавливаем сессию
 session_b64 = os.getenv("TELEGRAM_SESSION_B64")
 if session_b64 and not os.path.exists(SESSION_FILE):
     with open(SESSION_FILE, "wb") as f:
@@ -29,11 +32,11 @@ if session_b64 and not os.path.exists(SESSION_FILE):
 client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
 
 # ---------- Хранилища ----------
-games: Dict[int, dict] = {}                 # активные игры
-pending_invites: Dict[int, dict] = {}       # ожидающие приглашения
-invite_tasks: Dict[int, asyncio.Task] = {}  # задачи таймера
-ai_enabled: Dict[int, bool] = {}            # включён ли ИИ в чате
-conversation_history: Dict[int, list] = {}  # история диалогов для контекста
+games: Dict[int, dict] = {}
+pending_invites: Dict[int, dict] = {}
+invite_tasks: Dict[int, asyncio.Task] = {}
+ai_enabled: Dict[int, bool] = {}
+conversation_history: Dict[int, list] = {}
 
 # ---------- Класс игры (без изменений) ----------
 class TicTacToe:
@@ -116,7 +119,6 @@ def progress_bar(seconds_left: int, total_seconds: int = 300) -> str:
     return "█" * filled + "░" * (10 - filled)
 
 async def update_game_message(chat_id: int, game: TicTacToe):
-    """Обновляет игровое сообщение"""
     data = games.get(chat_id)
     if not data or not data.get('game_msg_id'):
         return
@@ -127,7 +129,6 @@ async def update_game_message(chat_id: int, game: TicTacToe):
         pass
 
 async def update_invite_message(chat_id: int, msg_id: int, start_time: float):
-    """Обновляет сообщение с приглашением каждую секунду."""
     while True:
         elapsed = time.time() - start_time
         seconds_left = max(0, 300 - int(elapsed))
@@ -148,60 +149,33 @@ async def update_invite_message(chat_id: int, msg_id: int, start_time: float):
             break
         await asyncio.sleep(1)
 
-# ---------- DeepSeek API ----------
+# ---------- Gemini AI ----------
 async def get_ai_response(chat_id: int, user_message: str) -> str:
-    """Отправляет запрос к DeepSeek API и возвращает ответ"""
-    if not DEEPSEEK_API_KEY:
-        return "❌ API-ключ DeepSeek не настроен. Добавьте DEEPSEEK_API_KEY в .env"
+    if not gemini_model:
+        return "❌ Gemini API ключ не настроен. Добавьте GEMINI_API_KEY в .env или секреты."
 
-    # Получаем историю чата (последние 10 сообщений)
+    # Собираем историю для контекста (последние 10 сообщений)
     history = conversation_history.get(chat_id, [])
-    messages = [
-        {"role": "system", "content": "Ты — дружелюбный и полезный ассистент. Отвечай кратко и по делу."}
-    ]
-    # Добавляем историю
-    for msg in history[-10:]:
-        messages.append(msg)
-    # Добавляем текущее сообщение
-    messages.append({"role": "user", "content": user_message})
-
-    payload = {
-        "model": "deepseek-chat",  # или deepseek-reasoner для сложных задач
-        "messages": messages,
-        "temperature": 0.7,
-        "max_tokens": 500
-    }
-
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    # Формируем промпт с историей
+    context = "\n".join(history[-10:])  # простая склейка, можно улучшить
+    prompt = f"{context}\nПользователь: {user_message}\nАссистент:"
 
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(DEEPSEEK_API_URL, json=payload, headers=headers, timeout=30) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    reply = data["choices"][0]["message"]["content"]
+        response = gemini_model.generate_content(prompt)
+        reply = response.text
 
-                    # Сохраняем в историю
-                    if chat_id not in conversation_history:
-                        conversation_history[chat_id] = []
-                    conversation_history[chat_id].append({"role": "user", "content": user_message})
-                    conversation_history[chat_id].append({"role": "assistant", "content": reply})
+        # Сохраняем в историю
+        if chat_id not in conversation_history:
+            conversation_history[chat_id] = []
+        conversation_history[chat_id].append(f"Пользователь: {user_message}")
+        conversation_history[chat_id].append(f"Ассистент: {reply}")
+        # Ограничиваем историю 20 сообщениями
+        if len(conversation_history[chat_id]) > 20:
+            conversation_history[chat_id] = conversation_history[chat_id][-20:]
 
-                    # Ограничиваем историю 20 сообщениями
-                    if len(conversation_history[chat_id]) > 20:
-                        conversation_history[chat_id] = conversation_history[chat_id][-20:]
-
-                    return reply
-                else:
-                    error_text = await resp.text()
-                    return f"❌ Ошибка API: {resp.status}\n{error_text[:200]}"
-    except asyncio.TimeoutError:
-        return "❌ Таймаут при обращении к DeepSeek API"
+        return reply
     except Exception as e:
-        return f"❌ Ошибка: {e}"
+        return f"❌ Ошибка Gemini: {e}"
 
 # ---------- Команды игры ----------
 @client.on(events.NewMessage(pattern=r'^/game\s+(@?\w+)'))
@@ -313,11 +287,10 @@ async def ai_toggle_command(event):
     action = event.raw_text.split()[1].lower()
     if action == "on":
         ai_enabled[chat_id] = True
-        await event.reply("🤖 ИИ включён! Я буду отвечать на сообщения в этом чате.")
+        await event.reply("🤖 ИИ (Gemini) включён! Я буду отвечать на сообщения в этом чате.")
     else:
         ai_enabled[chat_id] = False
         await event.reply("🤖 ИИ выключен.")
-        # Очищаем историю
         if chat_id in conversation_history:
             del conversation_history[chat_id]
 
@@ -341,7 +314,7 @@ async def handle_move(event):
     player_id = event.sender_id
 
     if game.is_bot_game and player_id != game.player1:
-        return  # не игрок
+        return
 
     if player_id != game.current_player and not (game.is_bot_game and game.current_player == "bot"):
         return
@@ -351,7 +324,7 @@ async def handle_move(event):
         if pos < 1 or pos > 9:
             raise ValueError
     except ValueError:
-        return  # не число или не 1-9 — возможно, это сообщение для ИИ
+        return
 
     if not game.make_move(player_id, pos):
         return
@@ -372,39 +345,29 @@ async def handle_move(event):
             if game.winner or game.draw:
                 del games[chat_id]
 
-# ---------- Обработка обычных сообщений для ИИ ----------
+# ---------- Обработка сообщений для ИИ ----------
 @client.on(events.NewMessage)
 async def handle_ai_response(event):
-    """Отвечает на сообщения через DeepSeek, если ИИ включён и нет активной игры"""
-    if event.out:  # игнорируем свои сообщения
+    if event.out:
         return
 
     chat_id = event.chat_id
     user_message = event.raw_text.strip()
 
-    # Игнорируем команды
     if user_message.startswith('/'):
         return
 
-    # Игнорируем, если ИИ выключен
     if not ai_enabled.get(chat_id, False):
         return
 
-    # Игнорируем, если идёт игра
     if chat_id in games:
         return
 
-    # Не отвечаем на пустые сообщения
     if not user_message:
         return
 
-    # Показываем, что ИИ думает
     thinking_msg = await event.reply("🤔 Думаю...")
-
-    # Получаем ответ от DeepSeek
     reply = await get_ai_response(chat_id, user_message)
-
-    # Обновляем сообщение с ответом
     try:
         await thinking_msg.edit(reply)
     except Exception:
@@ -413,16 +376,9 @@ async def handle_ai_response(event):
 # ---------- Запуск ----------
 async def main():
     await client.start()
-    print("✅ Userbot запущен. Доступные команды:")
-    print("🎮 Игра:")
-    print("   /game @username  – пригласить другого игрока")
-    print("   /game_bot        – сыграть с ботом")
-    print("   /join            – принять приглашение")
-    print("   /cancel          – отменить игру или приглашение")
-    print("🤖 ИИ:")
-    print("   /ai on           – включить ИИ в этом чате")
-    print("   /ai off          – выключить ИИ")
-    print("   /clear_history   – очистить историю диалога")
+    print("✅ Userbot запущен. Команды:")
+    print("🎮 Игра: /game @username, /game_bot, /join, /cancel")
+    print("🤖 ИИ: /ai on, /ai off, /clear_history")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
