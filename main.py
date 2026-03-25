@@ -6,7 +6,7 @@ import random
 from typing import Dict
 from telethon import TelegramClient, events
 from dotenv import load_dotenv
-import google.generativeai as genai
+from groq import Groq
 
 load_dotenv()
 
@@ -15,13 +15,12 @@ API_ID = int(os.getenv("TELEGRAM_API_ID", "34126767"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "44f1cdcc4c6544d60fe06be1b319d2dd")
 SESSION_FILE = "session_name.session"
 
-# Gemini API
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-    gemini_model = genai.GenerativeModel('gemini-2.0-flash-lite')  # или gemini-1.5-flash
+# Groq API
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+if GROQ_API_KEY:
+    groq_client = Groq(api_key=GROQ_API_KEY)
 else:
-    gemini_model = None
+    groq_client = None
 
 # Восстанавливаем сессию
 session_b64 = os.getenv("TELEGRAM_SESSION_B64")
@@ -36,7 +35,7 @@ games: Dict[int, dict] = {}
 pending_invites: Dict[int, dict] = {}
 invite_tasks: Dict[int, asyncio.Task] = {}
 ai_enabled: Dict[int, bool] = {}
-conversation_history: Dict[int, list] = {}
+conversation_history: Dict[int, list] = {}  # храним последние 10 сообщений
 
 # ---------- Класс игры (без изменений) ----------
 class TicTacToe:
@@ -149,35 +148,44 @@ async def update_invite_message(chat_id: int, msg_id: int, start_time: float):
             break
         await asyncio.sleep(1)
 
-# ---------- Gemini AI ----------
+# ---------- Groq AI ----------
 async def get_ai_response(chat_id: int, user_message: str) -> str:
-    if not gemini_model:
-        return "❌ Gemini API ключ не настроен. Добавьте GEMINI_API_KEY в .env или секреты."
+    if not groq_client:
+        return "❌ Groq API ключ не настроен. Добавьте GROQ_API_KEY в .env или секреты."
 
-    # Собираем историю для контекста (последние 10 сообщений)
+    # Формируем историю диалога
     history = conversation_history.get(chat_id, [])
-    # Формируем промпт с историей
-    context = "\n".join(history[-10:])  # простая склейка, можно улучшить
-    prompt = f"{context}\nПользователь: {user_message}\nАссистент:"
+    messages = [
+        {"role": "system", "content": "Ты — дружелюбный и полезный ассистент. Отвечай кратко и по делу."}
+    ]
+    for msg in history[-10:]:  # последние 10 сообщений
+        messages.append(msg)
+    messages.append({"role": "user", "content": user_message})
 
     try:
-        response = gemini_model.generate_content(prompt)
-        reply = response.text
+        completion = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",  # можно сменить на "mixtral-8x7b-32768" или "gemma2-9b-it"
+            messages=messages,
+            temperature=0.7,
+            max_tokens=500,
+            timeout=20
+        )
+        reply = completion.choices[0].message.content
 
         # Сохраняем в историю
         if chat_id not in conversation_history:
             conversation_history[chat_id] = []
-        conversation_history[chat_id].append(f"Пользователь: {user_message}")
-        conversation_history[chat_id].append(f"Ассистент: {reply}")
+        conversation_history[chat_id].append({"role": "user", "content": user_message})
+        conversation_history[chat_id].append({"role": "assistant", "content": reply})
         # Ограничиваем историю 20 сообщениями
         if len(conversation_history[chat_id]) > 20:
             conversation_history[chat_id] = conversation_history[chat_id][-20:]
 
         return reply
     except Exception as e:
-        return f"❌ Ошибка Gemini: {e}"
+        return f"❌ Ошибка Groq: {e}"
 
-# ---------- Команды игры ----------
+# ---------- Команды игры (без изменений) ----------
 @client.on(events.NewMessage(pattern=r'^/game\s+(@?\w+)'))
 async def game_command(event):
     args = event.raw_text.split(maxsplit=1)
@@ -287,7 +295,7 @@ async def ai_toggle_command(event):
     action = event.raw_text.split()[1].lower()
     if action == "on":
         ai_enabled[chat_id] = True
-        await event.reply("🤖 ИИ (Gemini) включён! Я буду отвечать на сообщения в этом чате.")
+        await event.reply("🤖 ИИ (Groq) включён! Я буду отвечать на сообщения в этом чате.")
     else:
         ai_enabled[chat_id] = False
         await event.reply("🤖 ИИ выключен.")
