@@ -1,27 +1,26 @@
-name: Run Telegram Bot
+name: Run Telegram Proxy Bot
 
 on:
   schedule:
-    - cron: '*/30 * * * *'   # запуск каждые 30 минут
-  workflow_dispatch:         # возможность запуска вручную
+    - cron: '0 * * * *'
+  workflow_dispatch:
 
 jobs:
-  run:
+  run-bot:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-
+      - uses: actions/checkout@v4
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
       - name: Run bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TELEGRAM_SESSION_B64: ${{ secrets.TELEGRAM_SESSION_B64 }}
+          USE_TELEGRAM_SOURCES: "true"
         run: python main.py
