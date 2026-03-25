@@ -251,20 +251,29 @@ async def callback_find_proxy(callback: types.CallbackQuery):
 
 async def update_progress(chat_id: int, msg_id: int, current: int, total: int):
     text = f"🔍 Проверено {current} из {total} прокси..."
-    await bot.edit_message_text(text, chat_id, msg_id)
+    await bot.edit_message_text(text=text, chat_id=chat_id, message_id=msg_id)
 
 async def search_and_send(user_id: int, chat_id: int, status_msg_id: int):
     try:
-        await bot.edit_message_text("🌐 Сбор прокси из всех источников...", chat_id, status_msg_id)
+        await bot.edit_message_text(
+            text="🌐 Сбор прокси из всех источников...",
+            chat_id=chat_id,
+            message_id=status_msg_id
+        )
         all_proxies = await fetch_all_proxies()
         if not all_proxies:
-            await bot.edit_message_text("❌ Не найдено ни одного прокси. Проверьте источники.", chat_id, status_msg_id)
+            await bot.edit_message_text(
+                text="❌ Не найдено ни одного прокси. Проверьте источники.",
+                chat_id=chat_id,
+                message_id=status_msg_id
+            )
             return
 
         proxies_to_check = all_proxies[:MAX_PROXIES_TO_CHECK]
         await bot.edit_message_text(
-            f"📦 Найдено {len(all_proxies)} прокси, проверяю {len(proxies_to_check)}...",
-            chat_id, status_msg_id
+            text=f"📦 Найдено {len(all_proxies)} прокси, проверяю {len(proxies_to_check)}...",
+            chat_id=chat_id,
+            message_id=status_msg_id
         )
 
         working = await check_proxies_batch(
@@ -288,13 +297,29 @@ async def search_and_send(user_id: int, chat_id: int, status_msg_id: int):
                 response += f"\n\n💡 **Другие варианты:**\n"
                 for p in working[1:4]:
                     response += f"`{p['ip']}:{p['port']}` – {p['speed']} сек\n"
-            await bot.edit_message_text(response, chat_id, status_msg_id, parse_mode="Markdown")
+            await bot.edit_message_text(
+                text=response,
+                chat_id=chat_id,
+                message_id=status_msg_id,
+                parse_mode="Markdown"
+            )
         else:
-            await bot.edit_message_text("❌ Не удалось найти ни одного рабочего прокси.", chat_id, status_msg_id)
+            await bot.edit_message_text(
+                text="❌ Не удалось найти ни одного рабочего прокси.",
+                chat_id=chat_id,
+                message_id=status_msg_id
+            )
 
     except Exception as e:
         logger.exception("Ошибка в search_and_send")
-        await bot.edit_message_text(f"❌ Произошла ошибка: {e}", chat_id, status_msg_id)
+        try:
+            await bot.edit_message_text(
+                text=f"❌ Произошла ошибка: {e}",
+                chat_id=chat_id,
+                message_id=status_msg_id
+            )
+        except Exception as e2:
+            logger.error(f"Не удалось отправить сообщение об ошибке: {e2}")
 
 @dp.callback_query(lambda c: c.data == "about")
 async def callback_about(callback: types.CallbackQuery):
