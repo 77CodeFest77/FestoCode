@@ -3,6 +3,7 @@ import os
 import base64
 import time
 import random
+import aiohttp
 from typing import Dict
 from telethon import TelegramClient, events
 from dotenv import load_dotenv
@@ -22,7 +23,7 @@ if GROQ_API_KEY:
 else:
     groq_client = None
 
-# Системный промпт
+# Системный промпт (можно задать в секрете AI_SYSTEM_PROMPT)
 DEFAULT_SYSTEM_PROMPT = os.getenv(
     "AI_SYSTEM_PROMPT",
     "Ты — дружелюбный и полезный ассистент. Отвечай кратко и по делу. "
@@ -30,8 +31,8 @@ DEFAULT_SYSTEM_PROMPT = os.getenv(
 )
 system_prompt = DEFAULT_SYSTEM_PROMPT
 
-# Задержка ответа (по умолчанию 5 секунд)
-AI_RESPONSE_DELAY = float(os.getenv("AI_RESPONSE_DELAY", "5.0"))
+# 👇 ЗАДЕРЖКА ОТВЕТА ИИ (секунды) — вписана прямо в код, без переменной окружения
+AI_RESPONSE_DELAY = 5.0
 
 # Восстанавливаем сессию
 session_b64 = os.getenv("TELEGRAM_SESSION_B64")
@@ -49,6 +50,7 @@ ai_enabled: Dict[int, bool] = {}
 pending_ai_tasks: Dict[int, asyncio.Task] = {}
 last_message_text: Dict[int, str] = {}
 conversation_history: Dict[int, list] = {}
+weather_waiting: Dict[int, dict] = {}
 
 # ---------- Класс игры ----------
 class TicTacToe:
@@ -195,7 +197,7 @@ async def get_ai_response(chat_id: int, user_message: str) -> str:
 
 # ---------- Функция отложенного ответа ----------
 async def delayed_ai_response(chat_id: int, thinking_msg_id: int, user_message: str):
-    await asyncio.sleep(AI_RESPONSE_DELAY)
+    await asyncio.sleep(AI_RESPONSE_DELAY)   # задержка прописана в коде
 
     if pending_ai_tasks.get(chat_id) != asyncio.current_task():
         return
@@ -371,6 +373,67 @@ async def clear_history_command(event):
     else:
         await event.reply("История и так пуста.")
 
+# ---------- Команды погоды ----------
+@client.on(events.NewMessage(pattern=r'^/(weather|LFS)$'))
+async def weather_command(event):
+    chat_id = event.chat_id
+    if chat_id in weather_waiting:
+        try:
+            await client.delete_messages(chat_id, weather_waiting[chat_id]['msg_id'])
+        except:
+            pass
+        del weather_waiting[chat_id]
+
+    msg = await event.reply("🌍 Введите название города (на русском или английском):")
+    weather_waiting[chat_id] = {'msg_id': msg.id}
+
+@client.on(events.NewMessage)
+async def handle_weather_city(event):
+    if event.out:
+        return
+    chat_id = event.chat_id
+    if chat_id not in weather_waiting:
+        return
+
+    city = event.raw_text.strip()
+    if not city or city.startswith('/'):
+        return
+
+    orig_msg_id = weather_waiting[chat_id]['msg_id']
+    del weather_waiting[chat_id]
+
+    try:
+        url = f"https://wttr.in/{city}?format=j1"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=10) as resp:
+                if resp.status != 200:
+                    raise Exception("Ошибка API")
+                data = await resp.json()
+                current = data['current_condition'][0]
+                temp_c = current['temp_C']
+                feels_like = current['FeelsLikeC']
+                humidity = current['humidity']
+                wind_speed = current['windspeedKmph']
+                weather_desc = current['weatherDesc'][0]['value']
+
+        weather_icons = {
+            "Sunny": "☀️", "Clear": "☀️", "Partly cloudy": "⛅", "Cloudy": "☁️",
+            "Overcast": "☁️", "Mist": "🌫️", "Fog": "🌫️", "Light rain": "🌦️",
+            "Rain": "🌧️", "Heavy rain": "🌧️", "Snow": "❄️", "Thunderstorm": "⛈️"
+        }
+        icon = weather_icons.get(weather_desc, "🌡️")
+        response = (
+            f"{icon} **Погода в городе {city.title()}**\n"
+            f"🌡️ Температура: **{temp_c}°C** (ощущается как {feels_like}°C)\n"
+            f"💧 Влажность: {humidity}%\n"
+            f"💨 Ветер: {wind_speed} км/ч\n"
+            f"📝 {weather_desc}"
+        )
+        await client.edit_message(chat_id, orig_msg_id, response, parse_mode='markdown')
+    except Exception:
+        error_msg = f"❌ Не удалось найти погоду для города «{city}». Проверьте название."
+        await client.edit_message(chat_id, orig_msg_id, error_msg)
+
 # ---------- Обработка ходов игры ----------
 @client.on(events.NewMessage)
 async def handle_move(event):
@@ -413,7 +476,7 @@ async def handle_move(event):
             if game.winner or game.draw:
                 del games[chat_id]
 
-# ---------- Обработка сообщений для ИИ (с задержкой и сообщением "Думаю...") ----------
+# ---------- Обработка сообщений для ИИ (с задержкой) ----------
 @client.on(events.NewMessage)
 async def handle_ai_response(event):
     if event.out:
@@ -434,18 +497,13 @@ async def handle_ai_response(event):
     if not user_message:
         return
 
-    # Сохраняем последнее сообщение
     last_message_text[chat_id] = user_message
 
-    # Отменяем предыдущий таймер, если был
     if chat_id in pending_ai_tasks:
         pending_ai_tasks[chat_id].cancel()
         del pending_ai_tasks[chat_id]
 
-    # Отправляем "Думаю..."
-    thinking = await event.reply("🤔 Раздумываю...")
-
-    # Запускаем таймер
+    thinking = await event.reply("🤔 Думаю...")
     task = asyncio.create_task(delayed_ai_response(chat_id, thinking.id, user_message))
     pending_ai_tasks[chat_id] = task
 
@@ -457,6 +515,7 @@ async def main():
     print("Команды:")
     print("🎮 Игра: /game @username, /game_bot, /join, /cancel")
     print("🤖 ИИ (только владелец): /ai on, /ai off, /set_prompt <текст>, /show_prompt, /clear_history")
+    print("🌦️ Погода: /weather или /LFS")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
