@@ -1,7 +1,7 @@
 """
-Telegram бот для поиска и проверки прокси (SOCKS5/HTTP).
-Поддерживает парсинг из Telegram-каналов и веб-сайтов.
-Автоматически создаёт сессию Telethon при локальном запуске.
+Telegram бот для поиска:
+- рабочих SOCKS5/HTTP прокси
+- VPN ботов с пробным периодом (из Telegram-каналов)
 """
 
 import asyncio
@@ -12,26 +12,25 @@ import sys
 import base64
 import logging
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 import aiohttp
+from aiohttp_socks import SocksConnector
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from dotenv import load_dotenv
 from telethon import TelegramClient
 
-# Загружаем переменные окружения из .env (для локального запуска)
 load_dotenv()
 
-# ---------- Настройки логирования ----------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# ---------- Чтение переменных окружения ----------
+# ---------- Переменные окружения ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TELEGRAM_API_ID_STR = os.getenv("TELEGRAM_API_ID")
 TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
@@ -41,18 +40,13 @@ CONCURRENT_CHECKS = int(os.getenv("CONCURRENT_CHECKS", "5"))
 PROXY_CHECK_TIMEOUT = int(os.getenv("PROXY_CHECK_TIMEOUT", "10"))
 PROXY_CHECK_URL = os.getenv("PROXY_CHECK_URL", "http://httpbin.org/ip")
 
-# Проверка обязательных переменных
 if not BOT_TOKEN:
     raise ValueError("❌ BOT_TOKEN не задан!")
 if USE_TELEGRAM_SOURCES:
     if not TELEGRAM_API_ID_STR or not TELEGRAM_API_HASH:
         raise ValueError("❌ Для Telegram источников нужны TELEGRAM_API_ID и TELEGRAM_API_HASH")
-    try:
-        API_ID = int(TELEGRAM_API_ID_STR)
-    except ValueError:
-        raise ValueError("❌ TELEGRAM_API_ID должно быть числом")
+    API_ID = int(TELEGRAM_API_ID_STR)
 
-# ---------- Инициализация бота ----------
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -61,26 +55,27 @@ WEB_PROXY_SOURCES = [
     {"url": "https://www.proxy-list.download/api/v1/get?type=socks5", "parser": "line_ip_port"},
     {"url": "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=10000&country=all", "parser": "line_ip_port"},
     {"url": "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt", "parser": "line_ip_port"},
-    {"url": "https://free-proxy-list.net/", "parser": "html_table"},
 ]
 
 TELEGRAM_PROXY_CHANNELS = [
-    "socks5_proxies",   # замените на реальные
+    "socks5_proxies",          # замените на реальные каналы
     "free_proxy_list",
 ]
 
+# Каналы, где ищем VPN ботов
+VPN_BOT_CHANNELS = [
+    "vpn_bots",                # пример
+    "free_vpn_bots",
+]
+
 IP_PORT_REGEX = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}\b")
+BOT_LINK_REGEX = re.compile(r"@[a-zA-Z0-9_]{5,32}\b|https?://t\.me/[a-zA-Z0-9_]{5,32}\b")
+VPN_KEYWORDS = re.compile(r"(VPN|vpn|пробный|бесплатный|free|trial)", re.IGNORECASE)
+
 SESSION_FILE = "session_name.session"
 
 # ---------- Управление сессией Telethon ----------
 async def get_telegram_client() -> TelegramClient:
-    """
-    Возвращает клиент Telethon с существующей сессией.
-    Если сессии нет:
-      - в GitHub Actions: выбрасывает ошибку
-      - локально: запускает интерактивное создание сессии и завершает бота
-    """
-    # Если задана переменная окружения с base64 сессией – восстанавливаем
     session_b64 = os.getenv("TELEGRAM_SESSION_B64")
     if session_b64 and not os.path.exists(SESSION_FILE):
         try:
@@ -93,22 +88,17 @@ async def get_telegram_client() -> TelegramClient:
     if os.path.exists(SESSION_FILE):
         return TelegramClient(SESSION_FILE, API_ID, TELEGRAM_API_HASH)
 
-    # Сессии нет
     if os.getenv("GITHUB_ACTIONS") == "true":
-        raise RuntimeError(
-            "Сессия Telethon не найдена в GitHub Actions. "
-            "Добавьте секрет TELEGRAM_SESSION_B64 с base64-кодированным файлом сессии."
-        )
+        raise RuntimeError("Сессия Telethon не найдена. Добавьте секрет TELEGRAM_SESSION_B64.")
 
-    # Локальный режим – интерактивное создание сессии
-    print("\n📱 Сессия Telethon не найдена. Создаём новую...")
+    print("\n📱 Сессия не найдена. Создаём новую...")
     client = TelegramClient(SESSION_FILE, API_ID, TELEGRAM_API_HASH)
     await client.start()
     print("✅ Сессия создана. Перезапустите бота.")
     await client.disconnect()
-    sys.exit(0)  # Выходим, чтобы бот перезапустился с готовой сессией
+    sys.exit(0)
 
-# ---------- Парсинг прокси ----------
+# ---------- Парсинг веб-источников ----------
 async def parse_web_source(session: aiohttp.ClientSession, source: Dict) -> List[Dict]:
     proxies = []
     try:
@@ -123,10 +113,6 @@ async def parse_web_source(session: aiohttp.ClientSession, source: Dict) -> List
                         parts = line.split(":")
                         if len(parts) >= 2 and parts[1].isdigit():
                             proxies.append({"ip": parts[0], "port": int(parts[1]), "source": source["url"]})
-            elif source["parser"] == "html_table":
-                for match in IP_PORT_REGEX.finditer(text):
-                    ip, port = match.group().split(":")
-                    proxies.append({"ip": ip, "port": int(port), "source": source["url"]})
     except Exception as e:
         logger.error(f"Ошибка при парсинге {source['url']}: {e}")
     return proxies
@@ -147,6 +133,7 @@ async def fetch_proxies_from_web() -> List[Dict]:
             unique[key] = p
     return list(unique.values())
 
+# ---------- Парсинг прокси из Telegram ----------
 async def fetch_proxies_from_telegram() -> List[Dict]:
     client = await get_telegram_client()
     async with client:
@@ -171,65 +158,91 @@ async def fetch_proxies_from_telegram() -> List[Dict]:
                 logger.error(f"Ошибка получения из {channel}: {e}")
         return all_proxies
 
-async def fetch_all_proxies() -> List[Dict]:
-    proxies = await fetch_proxies_from_web()
-    if USE_TELEGRAM_SOURCES:
-        tg_proxies = await fetch_proxies_from_telegram()
-        proxies.extend(tg_proxies)
-    # Удаление дубликатов
-    unique = {}
-    for p in proxies:
-        key = f"{p['ip']}:{p['port']}"
-        if key not in unique:
-            unique[key] = p
-    return list(unique.values())
+# ---------- Парсинг VPN ботов из Telegram ----------
+async def fetch_vpn_bots_from_telegram() -> List[Dict]:
+    """Ищет в каналах сообщения с ключевыми словами (VPN, пробный) и извлекает ссылки на ботов."""
+    client = await get_telegram_client()
+    async with client:
+        bots = []
+        for channel in VPN_BOT_CHANNELS:
+            try:
+                messages = await client.get_messages(channel, limit=200)
+                for msg in messages:
+                    if not msg.date or msg.date < datetime.now() - timedelta(days=7):
+                        continue
+                    if msg.text and VPN_KEYWORDS.search(msg.text):
+                        # Ищем ссылки на ботов
+                        links = BOT_LINK_REGEX.findall(msg.text)
+                        for link in links:
+                            bots.append({
+                                "link": link,
+                                "source": f"telegram:{channel}",
+                                "date": msg.date,
+                                "text": msg.text[:200]  # небольшой отрывок для контекста
+                            })
+            except Exception as e:
+                logger.error(f"Ошибка получения VPN ботов из {channel}: {e}")
+        # Убираем дубликаты ссылок
+        unique = {}
+        for b in bots:
+            key = b["link"]
+            if key not in unique:
+                unique[key] = b
+        return list(unique.values())
 
-# ---------- Проверка прокси ----------
-async def check_one_proxy(session: aiohttp.ClientSession, proxy: Dict, semaphore: asyncio.Semaphore) -> Optional[Dict]:
-    async with semaphore:
-        ip = proxy["ip"]
-        port = proxy["port"]
-        start = time.time()
-        try:
-            proxy_url = f"http://{ip}:{port}"
-            timeout = aiohttp.ClientTimeout(total=PROXY_CHECK_TIMEOUT)
-            async with session.get(PROXY_CHECK_URL, proxy=proxy_url, timeout=timeout) as resp:
+# ---------- Проверка прокси (SOCKS5) ----------
+async def check_proxy_socks5(proxy_ip: str, proxy_port: int) -> Tuple[bool, float, bool]:
+    """Проверяет SOCKS5 прокси через aiohttp_socks"""
+    start = time.time()
+    connector = SocksConnector.from_url(f"socks5://{proxy_ip}:{proxy_port}")
+    timeout = aiohttp.ClientTimeout(total=PROXY_CHECK_TIMEOUT)
+    try:
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            async with session.get(PROXY_CHECK_URL) as resp:
                 if resp.status == 200:
                     elapsed = round(time.time() - start, 2)
                     data = await resp.json()
                     origin_ip = data.get("origin", "")
-                    is_anonymous = origin_ip != ip
-                    return {
-                        "ip": ip,
-                        "port": port,
-                        "speed": elapsed,
-                        "anonymous": is_anonymous,
-                        "source": proxy.get("source", "unknown")
-                    }
-        except Exception:
-            pass
-    return None
+                    is_anonymous = origin_ip != proxy_ip
+                    return True, elapsed, is_anonymous
+    except Exception as e:
+        logger.debug(f"Proxy {proxy_ip}:{proxy_port} failed: {e}")
+    return False, 0, False
 
 async def check_proxies_batch(proxies: List[Dict], progress_callback=None) -> List[Dict]:
     semaphore = asyncio.Semaphore(CONCURRENT_CHECKS)
-    connector = aiohttp.TCPConnector(limit=CONCURRENT_CHECKS)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        tasks = [check_one_proxy(session, p, semaphore) for p in proxies]
-        results = []
-        for i, coro in enumerate(asyncio.as_completed(tasks)):
-            res = await coro
-            if res:
-                results.append(res)
-            if progress_callback and i % 5 == 0:
-                await progress_callback(i+1, len(proxies))
-        if progress_callback:
-            await progress_callback(len(proxies), len(proxies))
+    tasks = []
+    for p in proxies:
+        async def task(proxy):
+            async with semaphore:
+                ok, speed, anon = await check_proxy_socks5(proxy["ip"], proxy["port"])
+                if ok:
+                    return {
+                        "ip": proxy["ip"],
+                        "port": proxy["port"],
+                        "speed": speed,
+                        "anonymous": anon,
+                        "source": proxy.get("source", "unknown")
+                    }
+                return None
+        tasks.append(task(p))
+
+    results = []
+    for i, coro in enumerate(asyncio.as_completed(tasks)):
+        res = await coro
+        if res:
+            results.append(res)
+        if progress_callback and i % 5 == 0:
+            await progress_callback(i+1, len(proxies))
+    if progress_callback:
+        await progress_callback(len(proxies), len(proxies))
     return results
 
 # ---------- Клавиатуры ----------
 def get_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔍 Найти прокси", callback_data="find_proxy")],
+        [InlineKeyboardButton(text="🤖 Найти VPN ботов", callback_data="find_vpn")],
         [InlineKeyboardButton(text="ℹ️ О боте", callback_data="about")]
     ])
 
@@ -237,30 +250,59 @@ def get_main_keyboard() -> InlineKeyboardMarkup:
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "👋 Привет! Я бот для поиска рабочих прокси (SOCKS5/HTTP).\n\n"
-        "Использую несколько источников и проверяю скорость.\n\n"
+        "👋 Привет! Я могу:\n"
+        "• Найти рабочие SOCKS5 прокси\n"
+        "• Найти VPN ботов с пробным периодом в Telegram\n\n"
         "Выбери действие:",
         reply_markup=get_main_keyboard()
     )
 
 @dp.callback_query(lambda c: c.data == "find_proxy")
 async def callback_find_proxy(callback: types.CallbackQuery):
-    await callback.answer("🔍 Начинаю поиск...")
+    await callback.answer("🔍 Начинаю поиск прокси...")
     status_msg = await callback.message.answer("🔍 Собираю прокси из источников...")
-    asyncio.create_task(search_and_send(callback.from_user.id, status_msg.chat.id, status_msg.message_id))
+    asyncio.create_task(search_and_send_proxy(callback.from_user.id, status_msg.chat.id, status_msg.message_id))
 
+@dp.callback_query(lambda c: c.data == "find_vpn")
+async def callback_find_vpn(callback: types.CallbackQuery):
+    await callback.answer("🤖 Ищу VPN ботов...")
+    status_msg = await callback.message.answer("🔍 Поиск VPN ботов в Telegram...")
+    asyncio.create_task(search_and_send_vpn(callback.from_user.id, status_msg.chat.id, status_msg.message_id))
+
+@dp.callback_query(lambda c: c.data == "about")
+async def callback_about(callback: types.CallbackQuery):
+    await callback.answer()
+    await callback.message.answer(
+        "ℹ️ **О боте**\n\n"
+        "**Прокси:** собираются из веб-источников и Telegram-каналов.\n"
+        "Проверяются SOCKS5 прокси на скорость и анонимность.\n\n"
+        "**VPN боты:** ищутся в Telegram-каналах по ключевым словам (VPN, пробный, бесплатный).\n"
+        "Выводятся ссылки на ботов и фрагменты сообщений.\n\n"
+        "⚙️ Настройки:\n"
+        f"• Максимум прокси для проверки: {MAX_PROXIES_TO_CHECK}\n"
+        f"• Параллельных проверок: {CONCURRENT_CHECKS}\n"
+        f"• Таймаут проверки: {PROXY_CHECK_TIMEOUT} сек\n\n"
+        "Исходный код в репозитории.",
+        parse_mode="Markdown"
+    )
+
+# ---------- Поиск прокси (фоновая задача) ----------
 async def update_progress(chat_id: int, msg_id: int, current: int, total: int):
     text = f"🔍 Проверено {current} из {total} прокси..."
     await bot.edit_message_text(text=text, chat_id=chat_id, message_id=msg_id)
 
-async def search_and_send(user_id: int, chat_id: int, status_msg_id: int):
+async def search_and_send_proxy(user_id: int, chat_id: int, status_msg_id: int):
     try:
         await bot.edit_message_text(
             text="🌐 Сбор прокси из всех источников...",
             chat_id=chat_id,
             message_id=status_msg_id
         )
-        all_proxies = await fetch_all_proxies()
+        all_proxies = await fetch_proxies_from_web()
+        if USE_TELEGRAM_SOURCES:
+            tg_proxies = await fetch_proxies_from_telegram()
+            all_proxies.extend(tg_proxies)
+
         if not all_proxies:
             await bot.edit_message_text(
                 text="❌ Не найдено ни одного прокси. Проверьте источники.",
@@ -268,6 +310,14 @@ async def search_and_send(user_id: int, chat_id: int, status_msg_id: int):
                 message_id=status_msg_id
             )
             return
+
+        # Удаление дубликатов
+        unique = {}
+        for p in all_proxies:
+            key = f"{p['ip']}:{p['port']}"
+            if key not in unique:
+                unique[key] = p
+        all_proxies = list(unique.values())
 
         proxies_to_check = all_proxies[:MAX_PROXIES_TO_CHECK]
         await bot.edit_message_text(
@@ -290,8 +340,7 @@ async def search_and_send(user_id: int, chat_id: int, status_msg_id: int):
                 f"⚡ Скорость: {best['speed']} сек\n"
                 f"🔒 Анонимность: {'Да' if best['anonymous'] else 'Нет'}\n"
                 f"📡 Источник: {best['source']}\n\n"
-                f"ℹ️ Прокси можно использовать для обхода блокировок.\n"
-                f"Для Telegram лучше всего подойдёт MTProto, но этот прокси SOCKS5/HTTP."
+                f"ℹ️ Это SOCKS5 прокси. Используйте для обхода блокировок."
             )
             if len(working) > 1:
                 response += f"\n\n💡 **Другие варианты:**\n"
@@ -311,30 +360,59 @@ async def search_and_send(user_id: int, chat_id: int, status_msg_id: int):
             )
 
     except Exception as e:
-        logger.exception("Ошибка в search_and_send")
-        try:
+        logger.exception("Ошибка в search_and_send_proxy")
+        await bot.edit_message_text(
+            text=f"❌ Ошибка: {e}",
+            chat_id=chat_id,
+            message_id=status_msg_id
+        )
+
+# ---------- Поиск VPN ботов ----------
+async def search_and_send_vpn(user_id: int, chat_id: int, status_msg_id: int):
+    try:
+        await bot.edit_message_text(
+            text="🤖 Ищу VPN ботов в Telegram...",
+            chat_id=chat_id,
+            message_id=status_msg_id
+        )
+        if not USE_TELEGRAM_SOURCES:
             await bot.edit_message_text(
-                text=f"❌ Произошла ошибка: {e}",
+                text="❌ Поиск VPN ботов возможен только при включённых Telegram-источниках (USE_TELEGRAM_SOURCES=true).",
                 chat_id=chat_id,
                 message_id=status_msg_id
             )
-        except Exception as e2:
-            logger.error(f"Не удалось отправить сообщение об ошибке: {e2}")
+            return
 
-@dp.callback_query(lambda c: c.data == "about")
-async def callback_about(callback: types.CallbackQuery):
-    await callback.answer()
-    await callback.message.answer(
-        "ℹ️ **О боте**\n\n"
-        "Бот собирает прокси из открытых источников (веб-сайты, Telegram-каналы)\n"
-        "и проверяет их работоспособность.\n\n"
-        "⚙️ Настройки:\n"
-        f"• Максимум прокси для проверки: {MAX_PROXIES_TO_CHECK}\n"
-        f"• Параллельных проверок: {CONCURRENT_CHECKS}\n"
-        f"• Таймаут проверки: {PROXY_CHECK_TIMEOUT} сек\n\n"
-        "Исходный код доступен в репозитории.",
-        parse_mode="Markdown"
-    )
+        bots = await fetch_vpn_bots_from_telegram()
+        if not bots:
+            await bot.edit_message_text(
+                text="❌ Не найдено VPN ботов в указанных каналах.",
+                chat_id=chat_id,
+                message_id=status_msg_id
+            )
+            return
+
+        response = "🤖 **Найдены VPN боты с пробным периодом:**\n\n"
+        for b in bots[:10]:  # не больше 10
+            response += f"🔗 {b['link']}\n"
+            response += f"📢 *{b['source']}*\n"
+            response += f"📝 {b['text'][:100]}...\n\n"
+        response += "⚠️ Пробный период может быть ограничен. Уточняйте условия у ботов."
+
+        await bot.edit_message_text(
+            text=response,
+            chat_id=chat_id,
+            message_id=status_msg_id,
+            parse_mode="Markdown"
+        )
+
+    except Exception as e:
+        logger.exception("Ошибка в search_and_send_vpn")
+        await bot.edit_message_text(
+            text=f"❌ Ошибка: {e}",
+            chat_id=chat_id,
+            message_id=status_msg_id
+        )
 
 async def main():
     logger.info("Бот запущен")
