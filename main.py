@@ -339,7 +339,6 @@ async def process_with_ai(chat_id: int, user_message: str) -> str:
                 final = second.choices[0].message.content
                 conversation_history[chat_id].append({"role": "assistant", "content": final})
                 return final
-        # Если нет вызова функции, возвращаем текст, даже если он пустой
         if response.content:
             return response.content
         else:
@@ -355,8 +354,10 @@ async def handle_message(event):
     if event.out:
         return
     raw = event.raw_text.strip()
+    logger.info(f"Получено сообщение: {raw[:50]}")
     if not raw.lower().startswith("festka"):
         return
+    logger.info("Сообщение начинается с Festka, обрабатываем")
     user_message = raw[6:].strip()
     if not user_message:
         await event.reply("Скажите, что я могу сделать?")
