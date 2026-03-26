@@ -17,8 +17,8 @@ API_ID = int(os.getenv("TELEGRAM_API_ID", "34126767"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "44f1cdcc4c6544d60fe06be1b319d2dd")
 SESSION_FILE = "session_name.session"
 
-# Groq API
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# Groq API – используем OPEN_KEY
+OPEN_KEY = os.getenv("OPEN_KEY")   # ← здесь имя секрета
 
 # Системный промпт
 SYSTEM_PROMPT = """
@@ -194,12 +194,12 @@ async def update_invite_message(chat_id: int, msg_id: int, start_time: float):
             break
         await asyncio.sleep(1)
 
-# ---------- Groq AI ----------
+# ---------- Groq AI (используем OPEN_KEY) ----------
 async def get_groq_response(chat_id: int, user_message: str) -> str:
-    if not GROQ_API_KEY:
-        return "❌ GROQ_API_KEY не задан. Добавьте его в секреты или .env."
+    if not OPEN_KEY:
+        return "❌ OPEN_KEY не задан. Добавьте его в секреты или .env."
 
-    groq_client = Groq(api_key=GROQ_API_KEY)
+    groq_client = Groq(api_key=OPEN_KEY)
     history = conversation_history.get(chat_id, [])
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     for msg in history[-10:]:
