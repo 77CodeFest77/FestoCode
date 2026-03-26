@@ -25,7 +25,16 @@ if not OPEN_KEY:
     print("⚠️ OPEN_KEY не задан, бот не сможет отвечать!")
 groq_client = Groq(api_key=OPEN_KEY) if OPEN_KEY else None
 
-# ---------- Системный промпт с описанием функций ----------
+# ---------- Восстановление сессии ----------
+session_b64 = os.getenv("TELEGRAM_SESSION_B64")
+if session_b64 and not os.path.exists(SESSION_FILE):
+    with open(SESSION_FILE, "wb") as f:
+        f.write(base64.b64decode(session_b64))
+
+# Создаём клиента глобально, чтобы декораторы видели его
+client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
+
+# ---------- Системный промпт ----------
 SYSTEM_PROMPT = """
 Ты — FestoCode, интеллектуальный ассистент в Telegram. Ты умеешь играть в крестики-нолики, показывать погоду, получать информацию о пользователях и просто общаться.
 
@@ -70,7 +79,7 @@ SYSTEM_PROMPT = """
 """
 
 # ---------- Состояние игры ----------
-games: Dict[int, dict] = {}  # chat_id -> {'game': TicTacToe, 'game_msg_id': int}
+games: Dict[int, dict] = {}
 pending_ai_tasks: Dict[int, asyncio.Task] = {}
 ai_busy: Dict[int, bool] = {}
 conversation_history: Dict[int, List[dict]] = {}
@@ -157,64 +166,47 @@ async def update_game_message(chat_id: int, game: TicTacToe):
 
 # ---------- Функции, вызываемые ИИ ----------
 async def start_game_with_user(chat_id: int, username: str):
-    """Начать игру с указанным пользователем"""
     try:
         entity = await client.get_entity(username)
         player2_id = entity.id
     except Exception:
         return "❌ Пользователь не найден."
-    # В личном чате chat_id == sender_id, в группе нужно передавать sender_id. Для простоты считаем, что игра в личке.
     player1_id = chat_id
     if player1_id == player2_id:
         return "❌ Нельзя играть с самим собой!"
-
     if chat_id in games:
         return "❌ В этом чате уже идёт игра. Дождитесь её окончания."
-
     game = TicTacToe(player1_id, player2_id)
     game_msg = await client.send_message(chat_id, f"🎮 Игра началась! Первым ходит пользователь {player1_id}.\n" + game.render_board())
-    games[chat_id] = {
-        'game': game,
-        'game_msg_id': game_msg.id
-    }
+    games[chat_id] = {'game': game, 'game_msg_id': game_msg.id}
     return f"Игра начата с @{username}. Ход за вами."
 
 async def start_game_with_bot(chat_id: int):
-    """Начать игру с ботом"""
     if chat_id in games:
         return "❌ В этом чате уже идёт игра. Дождитесь её окончания."
     player_id = chat_id
     game = TicTacToe(player_id, "bot")
     game_msg = await client.send_message(chat_id, "🤖 Начинаем игру с ботом! Ваш ход.\n" + game.render_board())
-    games[chat_id] = {
-        'game': game,
-        'game_msg_id': game_msg.id
-    }
+    games[chat_id] = {'game': game, 'game_msg_id': game_msg.id}
     return "Игра с ботом начата. Ваш ход."
 
 async def make_move(chat_id: int, cell: int):
-    """Сделать ход в игре"""
     if chat_id not in games:
         return "❌ Нет активной игры. Чтобы начать, скажите: 'давай поиграем'."
     game = games[chat_id]['game']
     player_id = chat_id
     if game.is_bot_game and player_id != game.player1:
         return "❌ Сейчас не ваш ход (ходит бот)."
-
     if not game.make_move(player_id, cell):
         return "❌ Неверный ход. Клетка занята или не ваша очередь."
-
     await update_game_message(chat_id, game)
-
     if game.winner or game.draw:
+        del games[chat_id]
         if game.winner == "bot":
-            del games[chat_id]
             return "Бот победил! Игра окончена."
         elif game.winner:
-            del games[chat_id]
             return f"Победил пользователь {game.winner}! Игра окончена."
         else:
-            del games[chat_id]
             return "Ничья! Игра окончена."
     else:
         if game.is_bot_game and game.current_player == "bot":
@@ -237,7 +229,6 @@ async def make_move(chat_id: int, cell: int):
         return "Ход принят. Игра продолжается."
 
 async def get_weather(city: str) -> str:
-    """Получить погоду для города"""
     url = f"https://wttr.in/{city}?format=j1"
     try:
         async with aiohttp.ClientSession() as session:
@@ -256,7 +247,6 @@ async def get_weather(city: str) -> str:
         return f"Ошибка получения погоды: {e}"
 
 async def get_user_info(username: str) -> str:
-    """Получить информацию о пользователе по username"""
     try:
         entity = await client.get_entity(username)
         if isinstance(entity, User):
@@ -268,7 +258,6 @@ async def get_user_info(username: str) -> str:
             if entity.bio:
                 info += f"📝 О себе: {entity.bio}\n"
             info += f"🤖 Бот: {'Да' if entity.bot else 'Нет'}\n"
-            # Телефон виден только если пользователь в контактах или у нас есть доступ
             if hasattr(entity, 'phone') and entity.phone:
                 info += f"📞 Телефон: {entity.phone}\n"
             else:
@@ -281,68 +270,26 @@ async def get_user_info(username: str) -> str:
 
 # ---------- Обработка сообщений через ИИ ----------
 async def process_with_ai(chat_id: int, user_message: str) -> str:
-    """Отправляет сообщение в Groq, обрабатывает возможные вызовы функций и возвращает ответ"""
     if not groq_client:
         return "❌ Groq API не настроен. Добавьте OPEN_KEY."
 
-    # Формируем историю для контекста
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     history = conversation_history.get(chat_id, [])
     for msg in history[-20:]:
         messages.append(msg)
     messages.append({"role": "user", "content": user_message})
 
-    # Список доступных функций для Groq
     functions = [
-        {
-            "name": "start_game_with_user",
-            "description": "Начать игру в крестики-нолики с указанным пользователем",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "username": {"type": "string", "description": "Username пользователя (без @)"}
-                },
-                "required": ["username"]
-            }
-        },
-        {
-            "name": "start_game_with_bot",
-            "description": "Начать игру в крестики-нолики с ботом (компьютером)",
-            "parameters": {"type": "object", "properties": {}}
-        },
-        {
-            "name": "make_move",
-            "description": "Сделать ход в текущей игре",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "cell": {"type": "integer", "description": "Номер клетки от 1 до 9"}
-                },
-                "required": ["cell"]
-            }
-        },
-        {
-            "name": "get_weather",
-            "description": "Получить погоду в городе",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "city": {"type": "string", "description": "Название города"}
-                },
-                "required": ["city"]
-            }
-        },
-        {
-            "name": "get_user_info",
-            "description": "Получить информацию о пользователе по username",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "username": {"type": "string", "description": "Username пользователя (без @)"}
-                },
-                "required": ["username"]
-            }
-        }
+        {"name": "start_game_with_user", "description": "Начать игру в крестики-нолики с указанным пользователем",
+         "parameters": {"type": "object", "properties": {"username": {"type": "string"}}, "required": ["username"]}},
+        {"name": "start_game_with_bot", "description": "Начать игру в крестики-нолики с ботом (компьютером)",
+         "parameters": {"type": "object", "properties": {}}},
+        {"name": "make_move", "description": "Сделать ход в текущей игре",
+         "parameters": {"type": "object", "properties": {"cell": {"type": "integer"}}, "required": ["cell"]}},
+        {"name": "get_weather", "description": "Получить погоду в городе",
+         "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}},
+        {"name": "get_user_info", "description": "Получить информацию о пользователе по username",
+         "parameters": {"type": "object", "properties": {"username": {"type": "string"}}, "required": ["username"]}}
     ]
 
     try:
@@ -356,14 +303,12 @@ async def process_with_ai(chat_id: int, user_message: str) -> str:
             timeout=20
         )
         response = completion.choices[0].message
-        # Сохраняем ответ модели в историю
         if chat_id not in conversation_history:
             conversation_history[chat_id] = []
         conversation_history[chat_id].append({"role": "user", "content": user_message})
         if response.content:
             conversation_history[chat_id].append({"role": "assistant", "content": response.content})
 
-        # Проверяем, есть ли вызов функции
         if response.tool_calls:
             for tool_call in response.tool_calls:
                 func_name = tool_call.function.name
@@ -380,50 +325,38 @@ async def process_with_ai(chat_id: int, user_message: str) -> str:
                     result = await get_user_info(args["username"])
                 else:
                     result = "Неизвестная функция"
-                # Добавляем результат вызова в историю и повторно запрашиваем модель
                 conversation_history[chat_id].append({"role": "function", "name": func_name, "content": result})
-                # Повторный вызов Groq с обновлённой историей
                 new_messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history[chat_id]
-                second_completion = groq_client.chat.completions.create(
+                second = groq_client.chat.completions.create(
                     model="llama-3.3-70b-versatile",
                     messages=new_messages,
                     temperature=0.7,
                     max_tokens=500,
                     timeout=20
                 )
-                final_content = second_completion.choices[0].message.content
-                conversation_history[chat_id].append({"role": "assistant", "content": final_content})
-                return final_content
-        # Если нет вызова функции, возвращаем обычный текст
+                final = second.choices[0].message.content
+                conversation_history[chat_id].append({"role": "assistant", "content": final})
+                return final
         return response.content or "Извините, я не понял."
     except Exception as e:
         return f"❌ Ошибка: {e}"
 
-# ---------- Обработчик сообщений с триггером "Festka" ----------
+# ---------- Обработчик сообщений с триггером ----------
 @client.on(events.NewMessage)
 async def handle_message(event):
     if event.out:
         return
-    chat_id = event.chat_id
-    raw_text = event.raw_text.strip()
-    if not raw_text:
+    raw = event.raw_text.strip()
+    if not raw.lower().startswith("festka"):
         return
-
-    # Проверяем, начинается ли сообщение с "Festka" (без учёта регистра)
-    if not raw_text.lower().startswith("festka"):
-        return
-
-    # Убираем "festka" из начала
-    user_message = raw_text[6:].strip()
+    user_message = raw[6:].strip()
     if not user_message:
-        # Если после ключевого слова ничего нет, можно проигнорировать или попросить что-то написать
         await event.reply("Скажите, что я могу сделать?")
         return
-
+    chat_id = event.chat_id
     if ai_busy.get(chat_id, False):
         await event.reply("⏳ Подождите, предыдущий запрос ещё обрабатывается.")
         return
-
     ai_busy[chat_id] = True
     thinking = await event.reply("🤔 Думаю...")
     try:
@@ -436,12 +369,6 @@ async def handle_message(event):
 
 # ---------- Запуск ----------
 async def main():
-    global client
-    session_b64 = os.getenv("TELEGRAM_SESSION_B64")
-    if session_b64 and not os.path.exists(SESSION_FILE):
-        with open(SESSION_FILE, "wb") as f:
-            f.write(base64.b64decode(session_b64))
-    client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
     await client.start()
     me = await client.get_me()
     print(f"✅ Userbot запущен. Владелец: @{me.username} (ID: {me.id})")
