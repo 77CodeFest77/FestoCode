@@ -8,6 +8,7 @@ import re
 from typing import Dict
 from telethon import TelegramClient, events
 from dotenv import load_dotenv
+from groq import Groq
 
 load_dotenv()
 
@@ -16,8 +17,8 @@ API_ID = int(os.getenv("TELEGRAM_API_ID", "34126767"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "44f1cdcc4c6544d60fe06be1b319d2dd")
 SESSION_FILE = "session_name.session"
 
-# OpenRouter API
-OPEN_KEY = os.getenv("OPEN_KEY")
+# Groq API
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # Системный промпт
 SYSTEM_PROMPT = """
@@ -193,51 +194,41 @@ async def update_invite_message(chat_id: int, msg_id: int, start_time: float):
             break
         await asyncio.sleep(1)
 
-# ---------- OpenRouter AI (Gemini 2.0 Flash) ----------
-async def get_openrouter_response(user_message: str, api_key: str, chat_id: int = None) -> str:
-    url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
+# ---------- Groq AI ----------
+async def get_groq_response(chat_id: int, user_message: str) -> str:
+    if not GROQ_API_KEY:
+        return "❌ GROQ_API_KEY не задан. Добавьте его в секреты или .env."
 
+    groq_client = Groq(api_key=GROQ_API_KEY)
+    history = conversation_history.get(chat_id, [])
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    if chat_id and chat_id in conversation_history:
-        for msg in conversation_history[chat_id][-10:]:
-            messages.append(msg)
+    for msg in history[-10:]:
+        messages.append(msg)
     messages.append({"role": "user", "content": user_message})
 
-    payload = {
-        "model": "google/gemini-2.0-flash-exp:free",   # ← рабочая бесплатная модель
-        "messages": messages,
-        "temperature": 0.7,
-        "max_tokens": 500
-    }
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=20) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    return f"❌ Ошибка OpenRouter: {resp.status} {error_text[:200]}"
-                data = await resp.json()
-                reply = data["choices"][0]["message"]["content"]
+        completion = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=messages,
+            temperature=0.7,
+            max_tokens=500,
+            timeout=20
+        )
+        reply = completion.choices[0].message.content
 
-                if chat_id:
-                    if chat_id not in conversation_history:
-                        conversation_history[chat_id] = []
-                    conversation_history[chat_id].append({"role": "user", "content": user_message})
-                    conversation_history[chat_id].append({"role": "assistant", "content": reply})
-                    if len(conversation_history[chat_id]) > 20:
-                        conversation_history[chat_id] = conversation_history[chat_id][-20:]
+        if chat_id not in conversation_history:
+            conversation_history[chat_id] = []
+        conversation_history[chat_id].append({"role": "user", "content": user_message})
+        conversation_history[chat_id].append({"role": "assistant", "content": reply})
+        if len(conversation_history[chat_id]) > 20:
+            conversation_history[chat_id] = conversation_history[chat_id][-20:]
 
-                return reply
+        return reply
     except Exception as e:
-        return f"❌ Ошибка: {e}"
+        return f"❌ Ошибка Groq: {e}"
 
 async def get_ai_response(chat_id: int, user_message: str) -> str:
-    if not OPEN_KEY:
-        return "❌ OPEN_KEY не задан. Получи ключ на openrouter.ai и добавь в секреты."
-    return await get_openrouter_response(user_message, OPEN_KEY, chat_id)
+    return await get_groq_response(chat_id, user_message)
 
 # ---------- Функция отложенного ответа ----------
 async def delayed_ai_response(chat_id: int, thinking_msg_id: int, user_message: str):
