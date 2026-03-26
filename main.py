@@ -193,7 +193,7 @@ async def update_invite_message(chat_id: int, msg_id: int, start_time: float):
             break
         await asyncio.sleep(1)
 
-# ---------- OpenRouter AI (Qwen 2.5 7B) ----------
+# ---------- OpenRouter AI (Gemini 2.0 Flash) ----------
 async def get_openrouter_response(user_message: str, api_key: str, chat_id: int = None) -> str:
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
@@ -208,7 +208,7 @@ async def get_openrouter_response(user_message: str, api_key: str, chat_id: int 
     messages.append({"role": "user", "content": user_message})
 
     payload = {
-        "model": "qwen/qwen-2.5-7b-instruct:free",   # ← модель Qwen 2.5 7B (бесплатно)
+        "model": "google/gemini-2.0-flash-exp:free",   # ← рабочая бесплатная модель
         "messages": messages,
         "temperature": 0.7,
         "max_tokens": 500
