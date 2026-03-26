@@ -6,6 +6,7 @@ import random
 import aiohttp
 import re
 import json
+import logging
 from typing import Dict, List, Any, Optional
 from telethon import TelegramClient, events
 from telethon.tl.types import User
@@ -14,31 +15,39 @@ from groq import Groq
 
 load_dotenv()
 
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 # ---------- Конфигурация ----------
 API_ID = int(os.getenv("TELEGRAM_API_ID", "34126767"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "44f1cdcc4c6544d60fe06be1b319d2dd")
 SESSION_FILE = "session_name.session"
 
-# Groq API
 OPEN_KEY = os.getenv("OPEN_KEY")
 if not OPEN_KEY:
-    print("⚠️ OPEN_KEY не задан, бот не сможет отвечать!")
+    logger.error("OPEN_KEY не задан, бот не сможет отвечать!")
 groq_client = Groq(api_key=OPEN_KEY) if OPEN_KEY else None
 
-# ---------- Восстановление сессии ----------
+# Восстановление сессии
 session_b64 = os.getenv("TELEGRAM_SESSION_B64")
 if session_b64 and not os.path.exists(SESSION_FILE):
     with open(SESSION_FILE, "wb") as f:
         f.write(base64.b64decode(session_b64))
 
-# Создаём клиента глобально, чтобы декораторы видели его
 client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
+
+# ---------- Хранилища ----------
+games: Dict[int, dict] = {}
+pending_ai_tasks: Dict[int, asyncio.Task] = {}
+ai_busy: Dict[int, bool] = {}
+conversation_history: Dict[int, List[dict]] = {}
 
 # ---------- Системный промпт ----------
 SYSTEM_PROMPT = """
 Ты — FestoCode, интеллектуальный ассистент в Telegram. Ты умеешь играть в крестики-нолики, показывать погоду, получать информацию о пользователях и просто общаться.
 
-Важно: ты отвечаешь только на сообщения, которые начинаются со слова "Festka" (без учёта регистра). После этого слова ты получаешь запрос пользователя.
+Важно: ты отвечаешь на сообщения, которые начинаются со слова "Festka" (без учёта регистра). После этого слова ты получаешь запрос пользователя.
 
 Твои возможности:
 1. **Игра в крестики-нолики**:
@@ -77,12 +86,6 @@ SYSTEM_PROMPT = """
 
 Если функция не требуется, отвечай обычным текстом.
 """
-
-# ---------- Состояние игры ----------
-games: Dict[int, dict] = {}
-pending_ai_tasks: Dict[int, asyncio.Task] = {}
-ai_busy: Dict[int, bool] = {}
-conversation_history: Dict[int, List[dict]] = {}
 
 # ---------- Класс игры ----------
 class TicTacToe:
@@ -161,15 +164,16 @@ async def update_game_message(chat_id: int, game: TicTacToe):
     text = f"{game.render_board()}\n\n{game.get_status()}"
     try:
         await client.edit_message(chat_id, data['game_msg_id'], text)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Не удалось обновить игровое сообщение: {e}")
 
 # ---------- Функции, вызываемые ИИ ----------
 async def start_game_with_user(chat_id: int, username: str):
     try:
         entity = await client.get_entity(username)
         player2_id = entity.id
-    except Exception:
+    except Exception as e:
+        logger.error(f"Ошибка получения пользователя {username}: {e}")
         return "❌ Пользователь не найден."
     player1_id = chat_id
     if player1_id == player2_id:
@@ -244,6 +248,7 @@ async def get_weather(city: str) -> str:
                 weather_desc = current['weatherDesc'][0]['value']
                 return f"🌡️ {temp_c}°C (ощущается {feels_like}°C), 💧 {humidity}%, 💨 {wind_speed} км/ч, {weather_desc}"
     except Exception as e:
+        logger.error(f"Ошибка погоды: {e}")
         return f"Ошибка получения погоды: {e}"
 
 async def get_user_info(username: str) -> str:
@@ -266,9 +271,10 @@ async def get_user_info(username: str) -> str:
         else:
             return "❌ Это не пользователь, а канал или группа."
     except Exception as e:
+        logger.error(f"Ошибка получения информации: {e}")
         return f"❌ Ошибка при получении информации: {e}"
 
-# ---------- Обработка сообщений через ИИ ----------
+# ---------- Обработка сообщений через Groq ----------
 async def process_with_ai(chat_id: int, user_message: str) -> str:
     if not groq_client:
         return "❌ Groq API не настроен. Добавьте OPEN_KEY."
@@ -280,19 +286,15 @@ async def process_with_ai(chat_id: int, user_message: str) -> str:
     messages.append({"role": "user", "content": user_message})
 
     functions = [
-        {"name": "start_game_with_user", "description": "Начать игру в крестики-нолики с указанным пользователем",
-         "parameters": {"type": "object", "properties": {"username": {"type": "string"}}, "required": ["username"]}},
-        {"name": "start_game_with_bot", "description": "Начать игру в крестики-нолики с ботом (компьютером)",
-         "parameters": {"type": "object", "properties": {}}},
-        {"name": "make_move", "description": "Сделать ход в текущей игре",
-         "parameters": {"type": "object", "properties": {"cell": {"type": "integer"}}, "required": ["cell"]}},
-        {"name": "get_weather", "description": "Получить погоду в городе",
-         "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}},
-        {"name": "get_user_info", "description": "Получить информацию о пользователе по username",
-         "parameters": {"type": "object", "properties": {"username": {"type": "string"}}, "required": ["username"]}}
+        {"name": "start_game_with_user", "description": "Начать игру с пользователем", "parameters": {"type": "object", "properties": {"username": {"type": "string"}}, "required": ["username"]}},
+        {"name": "start_game_with_bot", "description": "Начать игру с ботом", "parameters": {"type": "object", "properties": {}}},
+        {"name": "make_move", "description": "Сделать ход в игре", "parameters": {"type": "object", "properties": {"cell": {"type": "integer"}}, "required": ["cell"]}},
+        {"name": "get_weather", "description": "Получить погоду", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}},
+        {"name": "get_user_info", "description": "Получить информацию о пользователе", "parameters": {"type": "object", "properties": {"username": {"type": "string"}}, "required": ["username"]}}
     ]
 
     try:
+        logger.info(f"Отправка запроса в Groq: {user_message[:100]}")
         completion = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=messages,
@@ -337,11 +339,17 @@ async def process_with_ai(chat_id: int, user_message: str) -> str:
                 final = second.choices[0].message.content
                 conversation_history[chat_id].append({"role": "assistant", "content": final})
                 return final
-        return response.content or "Извините, я не понял."
+        # Если нет вызова функции, возвращаем текст, даже если он пустой
+        if response.content:
+            return response.content
+        else:
+            logger.warning("Groq вернул пустой ответ, возвращаю fallback")
+            return "Я не понял запрос. Попробуйте перефразировать."
     except Exception as e:
+        logger.error(f"Ошибка при обработке AI: {e}")
         return f"❌ Ошибка: {e}"
 
-# ---------- Обработчик сообщений с триггером ----------
+# ---------- Обработчик сообщений ----------
 @client.on(events.NewMessage)
 async def handle_message(event):
     if event.out:
@@ -364,6 +372,7 @@ async def handle_message(event):
         await thinking.edit(answer)
     except Exception as e:
         await thinking.edit(f"❌ Ошибка: {e}")
+        logger.exception("Ошибка в handle_message")
     finally:
         ai_busy[chat_id] = False
 
