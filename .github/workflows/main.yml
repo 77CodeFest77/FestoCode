@@ -19,6 +19,5 @@ jobs:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
           TELEGRAM_SESSION_B64: ${{ secrets.TELEGRAM_SESSION_B64 }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          AI_SYSTEM_PROMPT: ${{ secrets.AI_SYSTEM_PROMPT }}
+          OPEN_KEY: ${{ secrets.OPEN_KEY }}
         run: python main.py
