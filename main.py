@@ -285,12 +285,13 @@ async def process_with_ai(chat_id: int, user_message: str) -> str:
         messages.append(msg)
     messages.append({"role": "user", "content": user_message})
 
+    # Инструменты в формате Groq (с полем type и функцией внутри)
     functions = [
-        {"name": "start_game_with_user", "description": "Начать игру с пользователем", "parameters": {"type": "object", "properties": {"username": {"type": "string"}}, "required": ["username"]}},
-        {"name": "start_game_with_bot", "description": "Начать игру с ботом", "parameters": {"type": "object", "properties": {}}},
-        {"name": "make_move", "description": "Сделать ход в игре", "parameters": {"type": "object", "properties": {"cell": {"type": "integer"}}, "required": ["cell"]}},
-        {"name": "get_weather", "description": "Получить погоду", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}},
-        {"name": "get_user_info", "description": "Получить информацию о пользователе", "parameters": {"type": "object", "properties": {"username": {"type": "string"}}, "required": ["username"]}}
+        {"type": "function", "function": {"name": "start_game_with_user", "description": "Начать игру с пользователем", "parameters": {"type": "object", "properties": {"username": {"type": "string"}}, "required": ["username"]}}},
+        {"type": "function", "function": {"name": "start_game_with_bot", "description": "Начать игру с ботом", "parameters": {"type": "object", "properties": {}}}},
+        {"type": "function", "function": {"name": "make_move", "description": "Сделать ход в игре", "parameters": {"type": "object", "properties": {"cell": {"type": "integer"}}, "required": ["cell"]}}},
+        {"type": "function", "function": {"name": "get_weather", "description": "Получить погоду", "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}}},
+        {"type": "function", "function": {"name": "get_user_info", "description": "Получить информацию о пользователе", "parameters": {"type": "object", "properties": {"username": {"type": "string"}}, "required": ["username"]}}}
     ]
 
     try:
