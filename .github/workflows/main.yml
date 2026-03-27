@@ -1,10 +1,12 @@
-name: Run Userbot Game
+name: Run Userbot Continuously
 
 on:
+  schedule:
+    - cron: '*/30 * * * *'
   workflow_dispatch:
 
 jobs:
-  run-userbot:
+  run:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,3 +23,6 @@ jobs:
           TELEGRAM_SESSION_B64: ${{ secrets.TELEGRAM_SESSION_B64 }}
           OPEN_KEY: ${{ secrets.OPEN_KEY }}
         run: python main.py
+      - name: Restart if failed
+        if: failure()
+        run: echo "Userbot crashed, will restart on next scheduled run."
