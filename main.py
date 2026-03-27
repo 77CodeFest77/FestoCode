@@ -351,21 +351,30 @@ async def process_with_ai(chat_id: int, user_message: str) -> str:
 # ---------- Обработчик сообщений ----------
 @client.on(events.NewMessage)
 async def handle_message(event):
+    # Проверка, что сообщение не от нас
     if event.out:
         return
+
     raw = event.raw_text.strip()
+    print(f"Получено сообщение: {raw}")  # принудительный вывод в консоль
     logger.info(f"Получено сообщение: {raw[:50]}")
-    if not raw.lower().startswith("festka"):
+
+    # Проверяем, начинается ли сообщение с "festka" (без учёта регистра)
+    # Используем регулярное выражение, чтобы обрабатывать "Festka,", "Festka " и т.д.
+    if not re.match(r'^festka\b', raw.lower()):
         return
-    logger.info("Сообщение начинается с Festka, обрабатываем")
-    user_message = raw[6:].strip()
+
+    print("Сообщение начинается с Festka, обрабатываем")
+    user_message = re.sub(r'^festka\b', '', raw.lower()).strip()
     if not user_message:
         await event.reply("Скажите, что я могу сделать?")
         return
+
     chat_id = event.chat_id
     if ai_busy.get(chat_id, False):
         await event.reply("⏳ Подождите, предыдущий запрос ещё обрабатывается.")
         return
+
     ai_busy[chat_id] = True
     thinking = await event.reply("🤔 Думаю...")
     try:
