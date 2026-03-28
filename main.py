@@ -9,17 +9,15 @@ import json
 import logging
 from typing import Dict, List, Any, Optional
 from telethon import TelegramClient, events
-from telethon.tl.types import User
+from telethon.tl.types import User, Message
 from dotenv import load_dotenv
 from groq import Groq
 
 load_dotenv()
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ---------- Конфигурация ----------
 API_ID = int(os.getenv("TELEGRAM_API_ID", "34126767"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "44f1cdcc4c6544d60fe06be1b319d2dd")
 SESSION_FILE = "session_name.session"
@@ -29,7 +27,6 @@ if not OPEN_KEY:
     logger.error("OPEN_KEY не задан, бот не сможет отвечать!")
 groq_client = Groq(api_key=OPEN_KEY) if OPEN_KEY else None
 
-# Восстановление сессии
 session_b64 = os.getenv("TELEGRAM_SESSION_B64")
 if session_b64 and not os.path.exists(SESSION_FILE):
     with open(SESSION_FILE, "wb") as f:
@@ -37,7 +34,6 @@ if session_b64 and not os.path.exists(SESSION_FILE):
 
 client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
 
-# ---------- Хранилища ----------
 games: Dict[int, dict] = {}
 pending_invites: Dict[int, dict] = {}
 invite_tasks: Dict[int, asyncio.Task] = {}
@@ -47,12 +43,10 @@ pending_ai_task: Dict[int, asyncio.Task] = {}
 conversation_history: Dict[int, List[dict]] = {}
 weather_waiting: Dict[int, dict] = {}
 
-# Хранилище для режима "жалкий"
 garbage_mode: Dict[int, bool] = {}
 original_messages: Dict[int, Dict[int, str]] = {}
 garbage_tasks: Dict[int, asyncio.Task] = {}
 
-# ---------- Системный промпт ----------
 SYSTEM_PROMPT = """
 Ты — FestoCode, интеллектуальный ассистент в Telegram. Ты умеешь играть в крестики-нолики, показывать погоду, получать информацию о пользователях и просто общаться.
 
@@ -96,7 +90,6 @@ SYSTEM_PROMPT = """
 Если функция не требуется, отвечай обычным текстом.
 """
 
-# ---------- Класс игры ----------
 class TicTacToe:
     def __init__(self, player1_id: int, player2_id):
         self.player1 = player1_id
@@ -166,7 +159,6 @@ class TicTacToe:
         current = "бот" if self.current_player == "bot" else self.current_player
         return f"Ход: {current}"
 
-# ---------- Вспомогательные функции ----------
 def format_time(seconds_left: int) -> str:
     m, s = divmod(seconds_left, 60)
     return f"{m:02d}:{s:02d}"
@@ -207,7 +199,6 @@ async def update_invite_message(chat_id: int, msg_id: int, start_time: float):
             break
         await asyncio.sleep(1)
 
-# ---------- Функции для вызовов Groq ----------
 async def start_game_with_user(chat_id: int, username: str):
     try:
         entity = await client.get_entity(username)
@@ -311,7 +302,6 @@ async def get_user_info(username: str) -> str:
     except Exception as e:
         return f"❌ Ошибка при получении информации: {e}"
 
-# ---------- Groq AI (с function calling) ----------
 async def get_groq_response(chat_id: int, user_message: str) -> str:
     if not groq_client:
         return "❌ Groq API не настроен. Добавьте OPEN_KEY."
@@ -439,55 +429,53 @@ async def clear_history(event):
     else:
         await event.reply("История пуста.")
 
-# ---------- Краш сообщений (улучшенное распознавание) ----------
-@client.on(events.NewMessage)
-async def handle_garbage_trigger(event):
-    if event.out:
-        return
+# ---------- Краш сообщений через команды ----------
+@client.on(events.NewMessage(pattern=r'^/cr$'))
+async def start_garbage_command(event):
+    """Команда /cr – начать краш сообщений (сообщение с командой удаляется)"""
+    # Удаляем сообщение с командой
+    await event.delete()
     chat_id = event.chat_id
-    text = event.raw_text.strip().lower()
-    logger.info(f"Получено сообщение: {text}")  # отладка
-
-    # Ищем фразу "я жалкий" (с учётом знаков препинания)
-    if re.search(r'\bя\s+жалкий\b', text):
-        if garbage_mode.get(chat_id, False):
-            await event.reply("Режим краша уже активен.")
-            return
-        user_id = event.sender_id
-        original_messages[chat_id] = {}
-        async for msg in client.iter_messages(chat_id, from_user=user_id, limit=500):
-            if msg.text:
-                original_messages[chat_id][msg.id] = msg.text
-        if not original_messages[chat_id]:
-            await event.reply("Нет сообщений для краша.")
-            return
-        garbage_mode[chat_id] = True
-        task = asyncio.create_task(garbage_animation(chat_id))
-        garbage_tasks[chat_id] = task
-        await event.reply("🔄 Начинаю крашить твои сообщения...")
+    if garbage_mode.get(chat_id, False):
+        await event.reply("⚠️ Режим краша уже активен.", reply_to=event.id)
         return
-
-    # Ищем фразу "все хорошо"
-    if re.search(r'\bвсе\s+хорошо\b', text):
-        if not garbage_mode.get(chat_id, False):
-            await event.reply("Режим краша не активен.")
-            return
-        if chat_id in garbage_tasks:
-            garbage_tasks[chat_id].cancel()
-            del garbage_tasks[chat_id]
-        restored = 0
-        for msg_id, orig_text in original_messages.get(chat_id, {}).items():
-            try:
-                await client.edit_message(chat_id, msg_id, orig_text)
-                restored += 1
-                await asyncio.sleep(0.2)
-            except Exception:
-                pass
-        if chat_id in original_messages:
-            del original_messages[chat_id]
-        garbage_mode[chat_id] = False
-        await event.reply(f"✅ Восстановлено {restored} сообщений.")
+    user_id = event.sender_id
+    original_messages[chat_id] = {}
+    # Собираем сообщения пользователя в этом чате
+    async for msg in client.iter_messages(chat_id, from_user=user_id, limit=500):
+        if msg.text:
+            original_messages[chat_id][msg.id] = msg.text
+    if not original_messages[chat_id]:
+        await event.reply("❌ Нет сообщений для краша.")
         return
+    garbage_mode[chat_id] = True
+    task = asyncio.create_task(garbage_animation(chat_id))
+    garbage_tasks[chat_id] = task
+    await event.reply("🔄 Краш сообщений активирован! Все твои сообщения в этом чате теперь переливаются.")
+
+@client.on(events.NewMessage(pattern=r'^/restore$'))
+async def restore_garbage_command(event):
+    """Команда /restore – восстановить оригинальные сообщения"""
+    await event.delete()
+    chat_id = event.chat_id
+    if not garbage_mode.get(chat_id, False):
+        await event.reply("⚠️ Режим краша не активен.")
+        return
+    if chat_id in garbage_tasks:
+        garbage_tasks[chat_id].cancel()
+        del garbage_tasks[chat_id]
+    restored = 0
+    for msg_id, orig_text in original_messages.get(chat_id, {}).items():
+        try:
+            await client.edit_message(chat_id, msg_id, orig_text)
+            restored += 1
+            await asyncio.sleep(0.2)
+        except Exception:
+            pass
+    if chat_id in original_messages:
+        del original_messages[chat_id]
+    garbage_mode[chat_id] = False
+    await event.reply(f"✅ Восстановлено {restored} сообщений.")
 
 # ---------- Обработчик сообщений для ИИ (триггер Festka) ----------
 @client.on(events.NewMessage)
@@ -526,9 +514,8 @@ async def main():
     print("/ai on  – включить ИИ (отвечает на сообщения, начинающиеся с 'Festka')")
     print("/ai off – выключить ИИ")
     print("/clear_history – очистить историю диалога")
-    print("Специальные команды в чате:")
-    print("я жалкий – начать краш всех ваших сообщений")
-    print("все хорошо – восстановить оригинальные сообщения")
+    print("/cr – начать краш ваших сообщений (переливание)")
+    print("/restore – восстановить оригинальные сообщения")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
