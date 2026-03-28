@@ -470,24 +470,27 @@ async def restore_garbage_command(event):
     garbage_mode[chat_id] = False
     await event.reply(f"✅ Восстановлено {restored} сообщений.")
 
-# ---------- Команда получения информации о пользователе ----------
-@client.on(events.NewMessage(pattern=r'^/gti(?:\s+(@\w+))?$'))
+# ---------- Команда /gti (получение информации о пользователе) ----------
+@client.on(events.NewMessage(pattern=r'^/gti\s*(?:@(\w+))?$'))
 async def get_user_info_command(event):
     await event.delete()
     chat_id = event.chat_id
-    match = re.match(r'^/gti\s+(@\w+)$', event.raw_text.strip())
+    # Проверяем, передан ли username в команде
+    match = re.match(r'^/gti\s+@(\w+)$', event.raw_text.strip())
     if match:
-        username = match.group(1).lstrip('@')
+        username = match.group(1)
         try:
             entity = await client.get_entity(username)
         except Exception:
             await event.reply(f"❌ Пользователь @{username} не найден.")
             return
     else:
-        reply_msg = await event.get_reply_message()
-        if reply_msg:
-            entity = reply_msg.sender_id
+        # Если нет username, ищем в ответе на сообщение
+        reply = await event.get_reply_message()
+        if reply:
+            entity = reply.sender_id
         else:
+            # Пытаемся найти username в тексте
             mention = re.search(r'@(\w+)', event.raw_text)
             if mention:
                 username = mention.group(1)
@@ -497,8 +500,16 @@ async def get_user_info_command(event):
                     await event.reply(f"❌ Пользователь @{username} не найден.")
                     return
             else:
-                await event.reply("❌ Укажите username или ответьте на сообщение пользователя.")
+                await event.reply("❌ Укажите username (например, /gti @username) или ответьте на сообщение пользователя.")
                 return
+
+    # Если entity - это ID, нужно получить объект пользователя
+    if isinstance(entity, int):
+        try:
+            entity = await client.get_entity(entity)
+        except Exception:
+            await event.reply("❌ Не удалось получить информацию о пользователе.")
+            return
 
     if not isinstance(entity, User):
         await event.reply("❌ Это не пользователь, а канал или группа.")
