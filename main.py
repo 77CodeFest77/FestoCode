@@ -372,7 +372,6 @@ async def get_groq_response(chat_id: int, user_message: str) -> str:
     except Exception as e:
         return f"❌ Ошибка: {e}"
 
-# ---------- Генерация каракулей ----------
 def random_garbage(length=30):
     chars = '!@#$%^&*()_+=-[]{};:,.<>/?\\|`~абвгдеёжзийклмнопрстуфхцчшщъыьэюя'
     return ''.join(random.choice(chars) for _ in range(random.randint(20, 50)))
@@ -399,7 +398,6 @@ async def garbage_animation(chat_id: int):
                 pass
         await asyncio.sleep(1.5)
 
-# ---------- Команды ----------
 @client.on(events.NewMessage(pattern=r'^/ai\s+(on|off)$'))
 async def ai_toggle(event):
     me = await client.get_me()
@@ -429,11 +427,8 @@ async def clear_history(event):
     else:
         await event.reply("История пуста.")
 
-# ---------- Краш сообщений через команды ----------
 @client.on(events.NewMessage(pattern=r'^/cr$'))
 async def start_garbage_command(event):
-    """Команда /cr – начать краш сообщений (сообщение с командой удаляется)"""
-    # Удаляем сообщение с командой
     await event.delete()
     chat_id = event.chat_id
     if garbage_mode.get(chat_id, False):
@@ -441,7 +436,6 @@ async def start_garbage_command(event):
         return
     user_id = event.sender_id
     original_messages[chat_id] = {}
-    # Собираем сообщения пользователя в этом чате
     async for msg in client.iter_messages(chat_id, from_user=user_id, limit=500):
         if msg.text:
             original_messages[chat_id][msg.id] = msg.text
@@ -455,7 +449,6 @@ async def start_garbage_command(event):
 
 @client.on(events.NewMessage(pattern=r'^/restore$'))
 async def restore_garbage_command(event):
-    """Команда /restore – восстановить оригинальные сообщения"""
     await event.delete()
     chat_id = event.chat_id
     if not garbage_mode.get(chat_id, False):
@@ -477,7 +470,66 @@ async def restore_garbage_command(event):
     garbage_mode[chat_id] = False
     await event.reply(f"✅ Восстановлено {restored} сообщений.")
 
-# ---------- Обработчик сообщений для ИИ (триггер Festka) ----------
+# ---------- Команда получения информации о пользователе ----------
+@client.on(events.NewMessage(pattern=r'^/gti(?:\s+(@\w+))?$'))
+async def get_user_info_command(event):
+    await event.delete()
+    chat_id = event.chat_id
+    match = re.match(r'^/gti\s+(@\w+)$', event.raw_text.strip())
+    if match:
+        username = match.group(1).lstrip('@')
+        try:
+            entity = await client.get_entity(username)
+        except Exception:
+            await event.reply(f"❌ Пользователь @{username} не найден.")
+            return
+    else:
+        reply_msg = await event.get_reply_message()
+        if reply_msg:
+            entity = reply_msg.sender_id
+        else:
+            mention = re.search(r'@(\w+)', event.raw_text)
+            if mention:
+                username = mention.group(1)
+                try:
+                    entity = await client.get_entity(username)
+                except Exception:
+                    await event.reply(f"❌ Пользователь @{username} не найден.")
+                    return
+            else:
+                await event.reply("❌ Укажите username или ответьте на сообщение пользователя.")
+                return
+
+    if not isinstance(entity, User):
+        await event.reply("❌ Это не пользователь, а канал или группа.")
+        return
+
+    info = f"👤 **Информация о пользователе**\n\n"
+    info += f"🆔 ID: `{entity.id}`\n"
+    info += f"📛 Имя: {entity.first_name or '—'}\n"
+    if entity.last_name:
+        info += f"📛 Фамилия: {entity.last_name}\n"
+    if entity.username:
+        info += f"🔖 Username: @{entity.username}\n"
+    if entity.bio:
+        info += f"📝 О себе: {entity.bio}\n"
+    info += f"🤖 Бот: {'Да' if entity.bot else 'Нет'}\n"
+    if hasattr(entity, 'phone') and entity.phone:
+        info += f"📞 Телефон: `{entity.phone}`\n"
+    else:
+        info += f"📞 Телефон: не доступен (пользователь не в контактах)\n"
+    if entity.photo:
+        info += f"🖼️ Фото профиля: есть\n"
+    else:
+        info += f"🖼️ Фото профиля: нет\n"
+    try:
+        full = await client.get_entity(entity.id)
+        if hasattr(full, 'status'):
+            info += f"🟢 Статус: {full.status}\n"
+    except:
+        pass
+    await event.reply(info, parse_mode='markdown')
+
 @client.on(events.NewMessage)
 async def handle_ai_response(event):
     if event.out:
@@ -505,7 +557,6 @@ async def handle_ai_response(event):
     finally:
         ai_busy[chat_id] = False
 
-# ---------- Запуск ----------
 async def main():
     await client.start()
     me = await client.get_me()
@@ -516,6 +567,7 @@ async def main():
     print("/clear_history – очистить историю диалога")
     print("/cr – начать краш ваших сообщений (переливание)")
     print("/restore – восстановить оригинальные сообщения")
+    print("/gti [@username] – получить информацию о пользователе (ответьте на сообщение или укажите username)")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
