@@ -3,10 +3,8 @@ import os
 import base64
 import random
 import re
-import json
 import logging
 from telethon import TelegramClient, events
-from telethon.network import ConnectionTcpMTProxyRandomizedIntermediate
 from telethon.tl.types import User
 from dotenv import load_dotenv
 from groq import Groq
@@ -21,22 +19,14 @@ API_HASH = os.getenv("TELEGRAM_API_HASH", "44f1cdcc4c6544d60fe06be1b319d2dd")
 OPEN_KEY = os.getenv("OPEN_KEY")
 groq_client = Groq(api_key=OPEN_KEY) if OPEN_KEY else None
 
-# MTProto прокси - секрет в байтах!
-PROXY = ("mtproto", "185.185.171.13", 443, bytes.fromhex("ee1c1c6e7cfd411b17b4f0b9a1e3a5a2"))
-
+# Без прокси – прямое подключение
 SESSION_FILE = "session_name.session"
 session_b64 = os.getenv("TELEGRAM_SESSION_B64")
 if session_b64 and not os.path.exists(SESSION_FILE):
     with open(SESSION_FILE, "wb") as f:
         f.write(base64.b64decode(session_b64))
 
-client = TelegramClient(
-    SESSION_FILE,
-    API_ID,
-    API_HASH,
-    connection=ConnectionTcpMTProxyRandomizedIntermediate,
-    proxy=PROXY
-)
+client = TelegramClient(SESSION_FILE, API_ID, API_HASH)
 
 # ---------- Хранилища ----------
 games = {}
@@ -248,7 +238,7 @@ async def ai_reply(event):
     ans = await groq_answer(q)
     await event.reply(ans)
 
-# ---------- Краш ----------
+# ---------- Краш сообщений ----------
 def garbage():
     chars = '!@#$%^&*()_+=-[]{};:,.<>/?\\|`~абвгдеёжзийклмнопрстуфхцчшщъыьэюя'
     return ''.join(random.choice(chars) for _ in range(random.randint(20,50)))
@@ -312,7 +302,7 @@ async def restore_cmd(event):
     garbage_mode[cid] = False
     await event.reply(f"✅ Восстановлено {cnt}")
 
-# ---------- Инфо о пользователе ----------
+# ---------- Информация о пользователе ----------
 @client.on(events.NewMessage(pattern=r'^/gti\s*(?:@(\w+))?$'))
 async def gti(event):
     await event.delete()
@@ -347,11 +337,10 @@ async def gti(event):
     if hasattr(u,'phone') and u.phone: info += f"\n📞 {u.phone}"
     await event.reply(info)
 
-# ---------- Генератор ключевых слов для поиска VPN ----------
+# ---------- Генератор ключевых слов для VPN ----------
 def generate_vpn_keywords():
     adjectives = [
         "быстрый", "бесплатный", "пробный", "секретный", "скрытый", "защищенный", "анонимный",
-        "быстрый", "мощный", "легкий", "надежный", "стабильный", "безлимитный", "неограниченный",
         "fast", "free", "trial", "secret", "hidden", "secure", "anonymous", "unlimited", "premium",
         "express", "ultra", "super", "mega", "turbo", "lightning", "rocket", "shadow"
     ]
@@ -372,48 +361,39 @@ def generate_vpn_keywords():
     ]
     
     keywords = set()
-    
     for n in nouns[:10]:
         keywords.add(n)
         keywords.add(f"{n} бот")
         keywords.add(f"{n} канал")
-    
     for adj in adjectives[:20]:
         for n in nouns[:8]:
             keywords.add(f"{adj} {n}")
             keywords.add(f"{adj} vpn")
             keywords.add(f"{adj} впн")
-    
     for c in colors:
         keywords.add(f"{c} vpn")
         keywords.add(f"{c} впн")
         keywords.add(f"{c} proxy")
         keywords.add(f"{c} прокси")
-    
     for a in animals:
         keywords.add(f"{a} vpn")
         keywords.add(f"{a} впн")
         keywords.add(f"{a} proxy")
-    
     for rw in random_words:
         keywords.add(f"{rw} vpn")
         keywords.add(f"{rw} впн")
         keywords.add(f"vpn {rw}")
-    
     eng_variants = ["vpn bot", "free vpn", "trial vpn", "vpn service", "vpn channel", 
                     "vpn proxy", "best vpn", "fast vpn", "secure vpn", "unlimited vpn",
                     "vpn telegram", "telegram vpn", "vpn free trial", "premium vpn free"]
     for ev in eng_variants:
         keywords.add(ev)
-    
     ru_variants = ["впн бот", "бесплатный впн", "пробный впн", "впн сервис", "впн канал",
                    "лучший впн", "быстрый впн", "безопасный впн", "впн телеграм", "телеграм впн"]
     for rv in ru_variants:
         keywords.add(rv)
-    
     return list(keywords)
 
-# ---------- Поиск VPN ботов ----------
 VPN_CHANNELS = [
     "vpn_bot_list",
     "free_vpn_bots",
@@ -429,9 +409,7 @@ async def search_vpn_bots():
     found = {}
     keywords = generate_vpn_keywords()
     random.shuffle(keywords)
-    
     logger.info(f"Сгенерировано {len(keywords)} ключевых слов для поиска")
-    
     for channel in VPN_CHANNELS:
         try:
             for kw in keywords[:40]:
@@ -453,35 +431,27 @@ async def search_vpn_bots():
                     continue
         except Exception as e:
             logger.error(f"Ошибка в канале {channel}: {e}")
-            continue
-    
     results = list(found.values())
     results.sort(key=lambda x: 0 if re.search(r'vpn|впн', x['text'].lower()) else 1)
-    
     return results[:15]
 
 @client.on(events.NewMessage(pattern=r'^/vpns$'))
 async def vpn_search_command(event):
     await event.delete()
     status = await event.reply("🔍 Ищу VPN ботов... Генерирую миллионы слов...\nЭто может занять 30-60 секунд")
-    
     try:
         bots = await search_vpn_bots()
-        
         if not bots:
             await status.edit("❌ Не найдено VPN ботов в указанных каналах.")
             return
-        
         response = "🤖 **НАЙДЕННЫЕ VPN БОТЫ**\n\n"
         for i, b in enumerate(bots[:15], 1):
             response += f"{i}. 🔗 {b['link']}\n"
             response += f"   📡 *Канал:* {b['source']}\n"
             response += f"   📝 *Найдено по:* {b['keyword']}\n"
             response += f"   📄 {b['text'][:100]}...\n\n"
-        
         response += "⚠️ Боты могут иметь пробный период. Уточняйте условия."
         await status.edit(response, parse_mode='markdown')
-        
     except Exception as e:
         await status.edit(f"❌ Ошибка: {e}")
         logger.exception("Ошибка поиска VPN")
