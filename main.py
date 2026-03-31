@@ -470,12 +470,114 @@ async def restore_garbage_command(event):
     garbage_mode[chat_id] = False
     await event.reply(f"✅ Восстановлено {restored} сообщений.")
 
+# ---------- Поиск VPN‑ботов с помощью Groq ----------
+VPN_SEARCH_CHANNELS = [
+    "vpn_bot_list",
+    "free_vpn_bots",
+    "vpn_offers",
+    "vpntrial",
+    "best_vpn_bots"
+]
+
+async def generate_keywords_with_groq() -> List[str]:
+    """Просит Groq сгенерировать 5 разнообразных ключевых слов для поиска VPN‑ботов."""
+    prompt = "Сгенерируй 5 случайных слов или фраз (на русском или английском), которые могут встречаться в названиях или описаниях VPN‑ботов в Telegram. Слова должны быть разнообразными, не повторяться. Выведи только список через запятую, без лишнего текста."
+    try:
+        completion = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.9,
+            max_tokens=100,
+            timeout=10
+        )
+        text = completion.choices[0].message.content
+        # Разбиваем по запятой и чистим
+        keywords = [kw.strip() for kw in text.split(",") if kw.strip()]
+        return keywords[:5]
+    except Exception as e:
+        logger.error(f"Ошибка генерации ключевых слов: {e}")
+        # fallback
+        return ["VPN", "бесплатный VPN", "пробный VPN", "vpn bot", "trial"]
+
+async def search_vpn_bots_with_groq(limit: int = 10) -> List[Dict]:
+    """
+    Собирает ссылки на ботов по ключевым словам, сгенерированным Groq,
+    затем просит Groq отфильтровать их и возвращает отфильтрованный список.
+    """
+    keywords = await generate_keywords_with_groq()
+    logger.info(f"Сгенерированные ключевые слова: {keywords}")
+
+    found = {}
+    for channel in VPN_SEARCH_CHANNELS:
+        try:
+            for kw in keywords:
+                async for msg in client.iter_messages(channel, search=kw, limit=50):
+                    if msg.text:
+                        links = re.findall(r'@[a-zA-Z0-9_]{5,32}\b|https?://t\.me/[a-zA-Z0-9_]{5,32}\b', msg.text)
+                        for link in links:
+                            if link.startswith("https://t.me/"):
+                                username = link.split("/")[-1]
+                                link = f"@{username}"
+                            if link not in found:
+                                found[link] = {
+                                    "link": link,
+                                    "source": f"telegram:{channel}",
+                                    "text": msg.text[:100]
+                                }
+        except Exception as e:
+            logger.error(f"Ошибка при поиске в канале {channel}: {e}")
+
+    all_links = list(found.keys())
+    if not all_links:
+        return []
+
+    # Отправляем список ссылок в Groq для фильтрации
+    filter_prompt = f"Вот список ссылок на Telegram‑боты. Отфильтруй только те, которые явно связаны с VPN (предоставляют VPN‑услуги, пробные периоды, бесплатные VPN). Остальные удали. Верни отфильтрованный список в том же формате (каждый элемент на новой строке), без лишнего текста.\n\nСписок:\n" + "\n".join(all_links)
+    try:
+        completion = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": filter_prompt}],
+            temperature=0.3,
+            max_tokens=500,
+            timeout=10
+        )
+        filtered_text = completion.choices[0].message.content
+        filtered_links = [line.strip() for line in filtered_text.split("\n") if line.strip() and line.strip() in found]
+    except Exception as e:
+        logger.error(f"Ошибка фильтрации: {e}")
+        filtered_links = all_links[:limit]  # fallback
+
+    # Возвращаем объекты только для отфильтрованных ссылок
+    result = []
+    for link in filtered_links[:limit]:
+        if link in found:
+            result.append(found[link])
+    return result
+
+@client.on(events.NewMessage(pattern=r'^/vpns$'))
+async def vpn_search_command(event):
+    await event.delete()
+    status_msg = await event.reply("🔍 Ищу VPN‑боты с помощью ИИ... (это может занять 20–30 секунд)")
+    try:
+        bots = await search_vpn_bots_with_groq(limit=10)
+        if not bots:
+            await status_msg.edit("❌ Не найдено VPN‑ботов в указанных каналах.")
+            return
+        response = "🤖 **Найденные VPN‑боты:**\n\n"
+        for b in bots:
+            response += f"🔗 {b['link']}\n"
+            response += f"📡 *Источник:* {b['source']}\n"
+            response += f"📝 *Отрывок:* {b['text'][:100]}...\n\n"
+        response += "⚠️ Боты могут иметь пробный период. Уточняйте условия у каждого."
+        await status_msg.edit(response, parse_mode='markdown')
+    except Exception as e:
+        await status_msg.edit(f"❌ Ошибка: {e}")
+
 # ---------- Команда /gti (получение информации о пользователе) ----------
 @client.on(events.NewMessage(pattern=r'^/gti\s*(?:@(\w+))?$'))
 async def get_user_info_command(event):
     await event.delete()
     chat_id = event.chat_id
-    # Проверяем, передан ли username в команде
     match = re.match(r'^/gti\s+@(\w+)$', event.raw_text.strip())
     if match:
         username = match.group(1)
@@ -485,12 +587,10 @@ async def get_user_info_command(event):
             await event.reply(f"❌ Пользователь @{username} не найден.")
             return
     else:
-        # Если нет username, ищем в ответе на сообщение
         reply = await event.get_reply_message()
         if reply:
             entity = reply.sender_id
         else:
-            # Пытаемся найти username в тексте
             mention = re.search(r'@(\w+)', event.raw_text)
             if mention:
                 username = mention.group(1)
@@ -503,7 +603,6 @@ async def get_user_info_command(event):
                 await event.reply("❌ Укажите username (например, /gti @username) или ответьте на сообщение пользователя.")
                 return
 
-    # Если entity - это ID, нужно получить объект пользователя
     if isinstance(entity, int):
         try:
             entity = await client.get_entity(entity)
@@ -579,6 +678,7 @@ async def main():
     print("/cr – начать краш ваших сообщений (переливание)")
     print("/restore – восстановить оригинальные сообщения")
     print("/gti [@username] – получить информацию о пользователе (ответьте на сообщение или укажите username)")
+    print("/vpns – найти VPN‑ботов с помощью ИИ (поиск по каналам)")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
