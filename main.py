@@ -21,8 +21,8 @@ API_HASH = os.getenv("TELEGRAM_API_HASH", "44f1cdcc4c6544d60fe06be1b319d2dd")
 OPEN_KEY = os.getenv("OPEN_KEY")
 groq_client = Groq(api_key=OPEN_KEY) if OPEN_KEY else None
 
-# MTProto прокси
-PROXY = ("mtproto", "185.185.171.13", 443, "ee1c1c6e7cfd411b17b4f0b9a1e3a5a2")
+# MTProto прокси - секрет в байтах!
+PROXY = ("mtproto", "185.185.171.13", 443, bytes.fromhex("ee1c1c6e7cfd411b17b4f0b9a1e3a5a2"))
 
 SESSION_FILE = "session_name.session"
 session_b64 = os.getenv("TELEGRAM_SESSION_B64")
@@ -347,9 +347,8 @@ async def gti(event):
     if hasattr(u,'phone') and u.phone: info += f"\n📞 {u.phone}"
     await event.reply(info)
 
-# ---------- ГЕНЕРАТОР МИЛЛИОНОВ СЛОВ ДЛЯ ПОИСКА VPN ----------
+# ---------- Генератор ключевых слов для поиска VPN ----------
 def generate_vpn_keywords():
-    """Генерирует 50+ разнообразных слов и фраз на русском и английском для поиска VPN ботов"""
     adjectives = [
         "быстрый", "бесплатный", "пробный", "секретный", "скрытый", "защищенный", "анонимный",
         "быстрый", "мощный", "легкий", "надежный", "стабильный", "безлимитный", "неограниченный",
@@ -374,46 +373,39 @@ def generate_vpn_keywords():
     
     keywords = set()
     
-    # Базовые ключевые слова
     for n in nouns[:10]:
         keywords.add(n)
         keywords.add(f"{n} бот")
         keywords.add(f"{n} канал")
     
-    # Прилагательное + существительное
     for adj in adjectives[:20]:
         for n in nouns[:8]:
             keywords.add(f"{adj} {n}")
             keywords.add(f"{adj} vpn")
             keywords.add(f"{adj} впн")
     
-    # Цвет + VPN
     for c in colors:
         keywords.add(f"{c} vpn")
         keywords.add(f"{c} впн")
         keywords.add(f"{c} proxy")
         keywords.add(f"{c} прокси")
     
-    # Животное + VPN
     for a in animals:
         keywords.add(f"{a} vpn")
         keywords.add(f"{a} впн")
         keywords.add(f"{a} proxy")
     
-    # Случайные слова + VPN
     for rw in random_words:
         keywords.add(f"{rw} vpn")
         keywords.add(f"{rw} впн")
         keywords.add(f"vpn {rw}")
     
-    # Английские вариации
     eng_variants = ["vpn bot", "free vpn", "trial vpn", "vpn service", "vpn channel", 
                     "vpn proxy", "best vpn", "fast vpn", "secure vpn", "unlimited vpn",
                     "vpn telegram", "telegram vpn", "vpn free trial", "premium vpn free"]
     for ev in eng_variants:
         keywords.add(ev)
     
-    # Русские вариации
     ru_variants = ["впн бот", "бесплатный впн", "пробный впн", "впн сервис", "впн канал",
                    "лучший впн", "быстрый впн", "безопасный впн", "впн телеграм", "телеграм впн"]
     for rv in ru_variants:
@@ -421,7 +413,7 @@ def generate_vpn_keywords():
     
     return list(keywords)
 
-# ---------- ПОИСК VPN БОТОВ ----------
+# ---------- Поиск VPN ботов ----------
 VPN_CHANNELS = [
     "vpn_bot_list",
     "free_vpn_bots",
@@ -434,7 +426,6 @@ VPN_CHANNELS = [
 ]
 
 async def search_vpn_bots():
-    """Ищет VPN ботов по 50+ разным ключевым словам"""
     found = {}
     keywords = generate_vpn_keywords()
     random.shuffle(keywords)
@@ -443,11 +434,10 @@ async def search_vpn_bots():
     
     for channel in VPN_CHANNELS:
         try:
-            for kw in keywords[:40]:  # берем первые 40 слов для скорости
+            for kw in keywords[:40]:
                 try:
                     async for msg in client.iter_messages(channel, search=kw, limit=20):
                         if msg.text:
-                            # Ищем ссылки на ботов
                             links = re.findall(r'@[a-zA-Z0-9_]{5,32}\b|https?://t\.me/[a-zA-Z0-9_]{5,32}\b', msg.text)
                             for link in links:
                                 if link.startswith("https://t.me/"):
@@ -465,7 +455,6 @@ async def search_vpn_bots():
             logger.error(f"Ошибка в канале {channel}: {e}")
             continue
     
-    # Сортируем результаты (сначала те, где в тексте есть vpn/vpn)
     results = list(found.values())
     results.sort(key=lambda x: 0 if re.search(r'vpn|впн', x['text'].lower()) else 1)
     
