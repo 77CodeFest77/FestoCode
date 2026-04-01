@@ -19,7 +19,9 @@ API_HASH = os.getenv("TELEGRAM_API_HASH", "44f1cdcc4c6544d60fe06be1b319d2dd")
 OPEN_KEY = os.getenv("OPEN_KEY")
 groq_client = Groq(api_key=OPEN_KEY) if OPEN_KEY else None
 
-# Без прокси – прямое подключение
+# Каналы для поиска (можно изменить через переменную окружения)
+VPN_CHANNELS = os.getenv("VPN_CHANNELS", "vpn_bot_list,free_vpn_bots,vpn_offers,vpntrial,best_vpn_bots").split(",")
+
 SESSION_FILE = "session_name.session"
 session_b64 = os.getenv("TELEGRAM_SESSION_B64")
 if session_b64 and not os.path.exists(SESSION_FILE):
@@ -37,7 +39,7 @@ original_msgs = {}
 garbage_tasks = {}
 ai_enabled = False
 
-# ---------- Класс игры ----------
+# ---------- Класс игры (оставлен без изменений) ----------
 class TicTacToe:
     def __init__(self, p1, p2):
         self.p1 = p1
@@ -337,81 +339,39 @@ async def gti(event):
     if hasattr(u,'phone') and u.phone: info += f"\n📞 {u.phone}"
     await event.reply(info)
 
-# ---------- Генератор ключевых слов для VPN ----------
-def generate_vpn_keywords():
-    adjectives = [
-        "быстрый", "бесплатный", "пробный", "секретный", "скрытый", "защищенный", "анонимный",
-        "fast", "free", "trial", "secret", "hidden", "secure", "anonymous", "unlimited", "premium",
-        "express", "ultra", "super", "mega", "turbo", "lightning", "rocket", "shadow"
-    ]
-    nouns = [
-        "vpn", "vpn сервис", "vpn бот", "впн", "впн сервис", "впн бот", "прокси", "proxy",
-        "tunnel", "туннель", "shield", "щит", "guard", "страж", "protection", "защита",
-        "connection", "соединение", "access", "доступ", "unblock", "разблокировка",
-        "net", "сеть", "gateway", "шлюз", "bridge", "мост", "fly", "полет", "speed", "скорость"
-    ]
-    colors = ["красный", "синий", "зеленый", "желтый", "черный", "белый", "фиолетовый", "оранжевый",
-              "red", "blue", "green", "yellow", "black", "white", "purple", "orange"]
-    animals = ["лиса", "волк", "дракон", "орел", "лев", "тигр", "медведь", "сокол",
-               "fox", "wolf", "dragon", "eagle", "lion", "tiger", "bear", "hawk"]
-    random_words = [
-        "кристалл", "молния", "ветер", "огонь", "вода", "земля", "небо", "звезда", "космос",
-        "crystal", "lightning", "wind", "fire", "water", "earth", "sky", "star", "space",
-        "дрифт", "цвет", "скорость", "секрет", "тень", "волна", "вихрь", "драйв"
-    ]
-    
-    keywords = set()
-    for n in nouns[:10]:
-        keywords.add(n)
-        keywords.add(f"{n} бот")
-        keywords.add(f"{n} канал")
-    for adj in adjectives[:20]:
-        for n in nouns[:8]:
-            keywords.add(f"{adj} {n}")
-            keywords.add(f"{adj} vpn")
-            keywords.add(f"{adj} впн")
-    for c in colors:
-        keywords.add(f"{c} vpn")
-        keywords.add(f"{c} впн")
-        keywords.add(f"{c} proxy")
-        keywords.add(f"{c} прокси")
-    for a in animals:
-        keywords.add(f"{a} vpn")
-        keywords.add(f"{a} впн")
-        keywords.add(f"{a} proxy")
-    for rw in random_words:
-        keywords.add(f"{rw} vpn")
-        keywords.add(f"{rw} впн")
-        keywords.add(f"vpn {rw}")
-    eng_variants = ["vpn bot", "free vpn", "trial vpn", "vpn service", "vpn channel", 
-                    "vpn proxy", "best vpn", "fast vpn", "secure vpn", "unlimited vpn",
-                    "vpn telegram", "telegram vpn", "vpn free trial", "premium vpn free"]
-    for ev in eng_variants:
-        keywords.add(ev)
-    ru_variants = ["впн бот", "бесплатный впн", "пробный впн", "впн сервис", "впн канал",
-                   "лучший впн", "быстрый впн", "безопасный впн", "впн телеграм", "телеграм впн"]
-    for rv in ru_variants:
-        keywords.add(rv)
-    return list(keywords)
+# ---------- НОВАЯ ФУНКЦИЯ: получение ключевых слов от Groq ----------
+async def get_keywords_from_groq() -> list:
+    prompt = (
+        "Ты — помощник, который помогает искать VPN-ботов в Telegram.\n"
+        "Сгенерируй 500 разнообразных ключевых слов (на русском и английском), которые могут встречаться в названиях или описаниях VPN-сервисов с низкими ценами и пробным периодом.\n"
+        "Каждое слово должно заканчиваться на 'Vpn' (если слово английское) или на 'Впн' (если слово русское).\n"
+        "Примеры: FastVpn, FreeVpn, ПробныйВпн, ДоступныйВпн, SpeedVpn и т.п.\n"
+        "Выдай только список слов, по одному на строку, без пояснений и нумерации."
+    )
+    response = await groq_answer(prompt)
+    if response.startswith("❌"):
+        return []
+    # Разбиваем ответ на строки, убираем пустые
+    words = [line.strip() for line in response.split('\n') if line.strip()]
+    return words[:500]  # не больше 500
 
-VPN_CHANNELS = [
-    "vpn_bot_list",
-    "free_vpn_bots",
-    "vpn_offers",
-    "vpntrial",
-    "best_vpn_bots",
-    "vpn_channel",
-    "vpn_service",
-    "vpn_proxy_list"
-]
-
+# ---------- Поиск VPN-ботов с использованием сгенерированных ключевых слов ----------
 async def search_vpn_bots():
     found = {}
-    keywords = generate_vpn_keywords()
+    # Получаем ключевые слова от Groq
+    keywords = await get_keywords_from_groq()
+    if not keywords:
+        logger.warning("Не удалось получить ключевые слова от Groq, используем fallback")
+        keywords = ["FreeVpn", "TrialVpn", "БесплатныйВпн", "ПробныйВпн", "SpeedVpn"]
+    logger.info(f"Получено {len(keywords)} ключевых слов для поиска")
+
+    # Перемешиваем для разнообразия
     random.shuffle(keywords)
-    logger.info(f"Сгенерировано {len(keywords)} ключевых слов для поиска")
+
+    # Ищем в заданных каналах
     for channel in VPN_CHANNELS:
         try:
+            # Используем только первые 40 слов, чтобы не превысить лимиты
             for kw in keywords[:40]:
                 try:
                     async for msg in client.iter_messages(channel, search=kw, limit=20):
@@ -431,6 +391,9 @@ async def search_vpn_bots():
                     continue
         except Exception as e:
             logger.error(f"Ошибка в канале {channel}: {e}")
+            continue
+
+    # Сортируем: сначала те, где в тексте явно упоминается VPN
     results = list(found.values())
     results.sort(key=lambda x: 0 if re.search(r'vpn|впн', x['text'].lower()) else 1)
     return results[:15]
@@ -438,19 +401,19 @@ async def search_vpn_bots():
 @client.on(events.NewMessage(pattern=r'^/vpns$'))
 async def vpn_search_command(event):
     await event.delete()
-    status = await event.reply("🔍 Ищу VPN ботов... Генерирую миллионы слов...\nЭто может занять 30-60 секунд")
+    status = await event.reply("🔍 Генерирую ключевые слова через Groq...\nЭто может занять 20-30 секунд")
     try:
         bots = await search_vpn_bots()
         if not bots:
-            await status.edit("❌ Не найдено VPN ботов в указанных каналах.")
+            await status.edit("❌ Не найдено VPN-ботов. Возможно, Groq не смог сгенерировать слова или каналы не содержат нужных сообщений.")
             return
-        response = "🤖 **НАЙДЕННЫЕ VPN БОТЫ**\n\n"
+        response = "🤖 **НАЙДЕННЫЕ VPN-БОТЫ**\n\n"
         for i, b in enumerate(bots[:15], 1):
             response += f"{i}. 🔗 {b['link']}\n"
             response += f"   📡 *Канал:* {b['source']}\n"
-            response += f"   📝 *Найдено по:* {b['keyword']}\n"
+            response += f"   📝 *Ключевое слово:* {b['keyword']}\n"
             response += f"   📄 {b['text'][:100]}...\n\n"
-        response += "⚠️ Боты могут иметь пробный период. Уточняйте условия."
+        response += "⚠️ Проверяйте условия у каждого бота."
         await status.edit(response, parse_mode='markdown')
     except Exception as e:
         await status.edit(f"❌ Ошибка: {e}")
@@ -470,7 +433,7 @@ async def main():
     print("/cr - краш сообщений")
     print("/restore - восстановить сообщения")
     print("/gti @username - информация о пользователе")
-    print("/vpns - найти VPN ботов (миллионы слов)")
+    print("/vpns - найти VPN-ботов (Groq генерирует ключевые слова)")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
